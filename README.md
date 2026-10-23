@@ -13,13 +13,18 @@ An end-to-end, production-grade **Medallion Lakehouse data pipeline** built with
 * **Landing Zone + 3 Granular Bronze Tables (`minutely_15`, `hourly`, `daily`):**
   * Fetches all 8 Australian Aged Care regional hubs in **one batched HTTP GET request** with per-location local IANA timezones (`Australia/Sydney`, `Australia/Darwin`, `Australia/Perth`, etc.).
   * Saves the unmodified HTTP payload to `data/landing/raw_json/ingestion_date=YYYY-MM-DD/batch_<call_id>.json` and fans out into `bronze.weather_minutely_15`, `bronze.weather_hourly`, and `bronze.weather_daily` for independent grain lineage.
-* **Silver Layer Depth (SCD Type 2, 13-Rule DQ Quarantine, 3-Guard Idempotent `MERGE`):**
-  * **`silver.dim_location_scd2`:** Tracks monitored care hubs, calculates Haversine grid-snap distance (`grid_snap_distance_km`) between requested facility coordinates and Open-Meteo's snapped NWP model grid cell, and maintains full **SCD Type 2** version history (`effective_from_utc`, `effective_to_utc`, `is_current`).
+* **Silver Layer Depth (SCD Type 2 Dimension, SCD Type 1 Fact `MERGE` Upserts + CDF, 13-Rule DQ Quarantine):**
+  * **`silver.dim_location_scd2` (SCD Type 2):** Tracks monitored care hubs, calculates Haversine grid-snap distance (`grid_snap_distance_km`) between requested facility coordinates and Open-Meteo's snapped NWP model grid cell, and maintains full **SCD Type 2** version history (`effective_from_utc`, `effective_to_utc`, `is_current`).
+  * **`silver.fact_weather_minutely_15`, `silver.fact_weather_hourly`, `silver.fact_weather_daily` (SCD Type 1 Upsert via Three-Guard `MERGE INTO` + Change Data Feed):**
+    * Manages the sliding 14-day API window (`past_days=7` + `forecast_days=7`) using **SCD Type 1** in-place upserts on the natural key (`(location_id, observation_local_time)` or `(location_id, observation_local_date)`):
+      * **Overlapping Window (Forecast Revisions & Forecast $\rightarrow$ Actuals):** When a newer API run revises a future forecast or replaces yesterday's forecast with past-modelled actuals, **SCD Type 1 `WHEN MATCHED THEN UPDATE`** overwrites the row in-place so downstream Gold queries always see a single authoritative value per timestamp without duplicate rows, while **Delta Change Data Feed (`delta.enableChangeDataFeed = true`)** and Delta Time Travel preserve prior forecast revisions in `_change_data` / `_delta_log`.
+      * **New Future Window:** New dates/timestamps entering the 7-day forward horizon are appended via **`WHEN NOT MATCHED THEN INSERT`**.
+      * **Historical Accumulation (>7 Days Ago):** Records older than `past_days=7` are untouched by the `MERGE`, so the Silver fact tables continuously accumulate permanent historical weather history over time.
+    * **Three Idempotency Guards:**
+      1. *Incremental Read:* Processes only the target `pipeline_run_id` batch so failed Bronze rows are quarantined once.
+      2. *Source Deduplication:* `ROW_NUMBER() OVER (PARTITION BY <keys> ORDER BY api_ingested_at_utc DESC) = 1`.
+      3. *Newer-Only & Value-Changed Update:* `WHEN MATCHED AND src.api_ingested_at_utc >= tgt.api_ingested_at_utc AND src.row_value_hash != tgt.row_value_hash THEN UPDATE`, preventing stale replays from overwriting newer forecasts and keeping Delta's Change Data Feed (`_change_data`) free of no-op updates.
   * **Two-Stage Data Quality Gate (`13 Rules` $\rightarrow$ `silver.quarantine_weather_records`):** Evaluates Stage-1 structural/array-parity rules (`DQ-STRUCT-001..003`) prior to array explosion and Stage-2 physical/domain rules (`DQ-KEY-001`, `DQ-PHY-001..007`, `DQ-LOGIC-001`, `DQ-DOM-001` including WMO code `97`) post-explosion.
-  * **Three-Guard Idempotent `MERGE INTO` + Change Data Feed (`CDF`):**
-    1. *Incremental Read:* Processes only the target `pipeline_run_id` batch so failed Bronze rows are quarantined once.
-    2. *Source Deduplication:* `ROW_NUMBER() OVER (PARTITION BY <keys> ORDER BY api_ingested_at_utc DESC) = 1`.
-    3. *Newer-Only & Value-Changed Update:* `WHEN MATCHED AND src.api_ingested_at_utc >= tgt.api_ingested_at_utc AND src.row_value_hash != tgt.row_value_hash THEN UPDATE`, preventing stale replays from overwriting newer forecasts and keeping Delta's Change Data Feed (`_change_data`) free of no-op updates.
 * **Gold Layer Marts (Dynamic Facility-Local Horizon & Care Risk Alerting):**
   * Evaluates `is_forecast` and `data_horizon_type` (`PAST_MODELLED`, `TODAY_MIXED`, `FORWARD_FORECAST`) dynamically in Gold against each facility's local calendar date—keeping Silver free of time-variant boolean flags.
   * Generates actionable aged-care risk alerts (`NORMAL`, `WATCH`, `WARNING`, `CRITICAL`) with clinical care protocols in `gold.mart_care_facility_risk_alerts`.
@@ -52,21 +57,21 @@ flowchart LR
         RAW["data/landing/raw_json/<br/>ingestion_date=YYYY-MM-DD/"]
     end
 
-    subgraph Bronze["Bronze Layer (3 Delta Tables)"]
+    subgraph Bronze["Bronze Layer (3 Append-Only Delta Tables)"]
         B_M15["bronze.weather_minutely_15"]
         B_HR["bronze.weather_hourly"]
         B_DY["bronze.weather_daily"]
     end
 
-    subgraph Silver["Silver Layer (SCD2, 3-Guard MERGE, Quarantine)"]
-        S_LOC["silver.dim_location_scd2"]
-        S_M15["silver.fact_weather_minutely_15"]
-        S_HR["silver.fact_weather_hourly"]
-        S_DY["silver.fact_weather_daily"]
-        S_QUAR["silver.quarantine_weather_records"]
+    subgraph Silver["Silver Layer (SCD2 Dim, SCD1 Fact 3-Guard MERGE + CDF, Quarantine)"]
+        S_LOC["silver.dim_location_scd2<br/>(SCD Type 2 Version History)"]
+        S_M15["silver.fact_weather_minutely_15<br/>(SCD Type 1 MERGE + CDF)"]
+        S_HR["silver.fact_weather_hourly<br/>(SCD Type 1 MERGE + CDF)"]
+        S_DY["silver.fact_weather_daily<br/>(SCD Type 1 MERGE + CDF)"]
+        S_QUAR["silver.quarantine_weather_records<br/>(13-Rule Dead-Letter)"]
     end
 
-    subgraph Gold["Gold Layer Marts"]
+    subgraph Gold["Gold Layer Marts (SCD Type 1 MERGE)"]
         G_SUM["gold.mart_daily_weather_summary"]
         G_RISK["gold.mart_care_facility_risk_alerts"]
     end
@@ -75,13 +80,13 @@ flowchart LR
     API -->|2. Save Raw Payload| RAW
     SEED --> B_M15 & B_HR & B_DY
     RAW --> B_M15 & B_HR & B_DY
-    B_HR --> S_LOC
-    B_M15 --> S_M15
-    B_HR --> S_HR
-    B_DY --> S_DY
+    B_HR -->|SCD2 Versioning| S_LOC
+    B_M15 -->|SCD1 3-Guard MERGE| S_M15
+    B_HR -->|SCD1 3-Guard MERGE| S_HR
+    B_DY -->|SCD1 3-Guard MERGE| S_DY
     B_M15 & B_HR & B_DY -.->|Failed DQ Rules| S_QUAR
-    S_LOC & S_HR & S_DY --> G_SUM
-    S_LOC & S_DY --> G_RISK
+    S_LOC & S_HR & S_DY -->|SCD1 MERGE| G_SUM
+    S_LOC & S_DY -->|SCD1 MERGE| G_RISK
 ```
 
 ---
