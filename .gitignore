@@ -1,0 +1,22 @@
+# Environment variables
+.env
+
+# Runtime data & logs
+data/
+logs/
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/

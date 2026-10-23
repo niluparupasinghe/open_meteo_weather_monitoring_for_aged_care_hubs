@@ -1,0 +1,52 @@
+# Architecture Decision Records (ADRs)
+
+## ADR-001: Landing Zone + 3 Granular Bronze Tables (`minutely_15`, `hourly`, `daily`)
+* **Context:** Open-Meteo `/v1/forecast` can return `minutely_15`, `hourly`, and `daily` time-series blocks in a single HTTP response. However, `minutely_15` produces $96\times$ as many timestamps per day as `daily`.
+* **Decision:**
+  1. Persist the unmodified multi-location HTTP response JSON in an immutable **Landing Zone** (`data/landing/raw_json/ingestion_date=YYYY-MM-DD/batch_<call_id>.json`).
+  2. Split the landed payload into **three grain-specific Bronze Delta tables**: `bronze.weather_minutely_15`, `bronze.weather_hourly`, and `bronze.weather_daily`.
+* **Consequences:** Single network round-trip per batch, full raw file auditability for cold S3 archival, and independent lineage/replay per temporal resolution without scanning bloated 15-minute arrays during hourly/daily backfills.
+
+---
+
+## ADR-002: Per-Location Local Timezones + `utc_offset_seconds` (Time Semantics)
+* **Context:** Open-Meteo computes `daily` aggregations (`temperature_2m_max`, `temperature_2m_min`, `precipitation_sum`) over the 24-hour calendar day of whatever `timezone` parameter is passed in the query. If `timezone=UTC` is requested for Australian care hubs, a "day" in Sydney (`UTC+11`) runs from 11:00 AM to 11:00 AM local time, corrupting daily heatwave alerts and misaligning hourly-to-daily joins across Perth (`+8`), Darwin (`+9:30`), and Sydney (`+11`).
+* **Decision:**
+  1. Request each facility's local IANA timezone (`timezone=Australia/Sydney,Australia/Melbourne,...`) in the batched API request.
+  2. Capture `utc_offset_seconds` from the top-level API JSON response in all 3 Bronze tables.
+  3. In Silver (`fact_weather_minutely_15`, `fact_weather_hourly`), store **both** `observation_local_time` / `observation_local_date` (the facility's true local calendar date) and true `observation_time_utc` (`observation_local_time - utc_offset_seconds`).
+  4. Join `hourly` and `daily` in Gold on `(location_id, observation_local_date)`.
+
+---
+
+## ADR-003: Three-Guard Idempotent Silver `MERGE INTO` & Clean Change Data Feed (CDF)
+* **Context:** Unconditional `MERGE INTO` statements or full Bronze table rescans cause duplicate quarantine rows, allow out-of-order replays to overwrite newer forecasts, and flood Delta Lake's Change Data Feed (`_change_data`) with millions of no-op `update_postimage` records.
+* **Decision:** Enforce three strict guards on every Silver fact `MERGE`:
+  1. **Guard 1 (Incremental Read):** Filter Bronze by the active `pipeline_run_id` so failed rows are evaluated and quarantined once per batch.
+  2. **Guard 2 (Source Deduplication):** Deduplicate candidate rows on primary key via `ROW_NUMBER() OVER (PARTITION BY <keys> ORDER BY api_ingested_at_utc DESC) = 1`.
+  3. **Guard 3 (Newer-Only & Value-Changed Update):**
+     ```sql
+     WHEN MATCHED AND src.api_ingested_at_utc >= tgt.api_ingested_at_utc
+                  AND src.row_value_hash != tgt.row_value_hash
+     THEN UPDATE SET *
+     ```
+
+---
+
+## ADR-004: Dynamic Horizon Evaluation (`PAST_MODELLED` / `TODAY_MIXED` / `FORWARD_FORECAST`) in Gold Only
+* **Context:** Storing a boolean `is_forecast` column in Silver is a time-variant anti-pattern: tomorrow's forecast (`is_forecast = true` today) becomes yesterday's history two days later, requiring constant rewrites of historical Silver partitions. Furthermore, Open-Meteo `/v1/forecast` with `past_days=7` provides archived model analysis/hindcast grids rather than physical weather-station gauge observations.
+* **Decision:** Keep Silver purely time-series invariant (no `is_forecast` column). Evaluate `is_forecast` and the 3-state `data_horizon_type` (`PAST_MODELLED`, `TODAY_MIXED`, `FORWARD_FORECAST`) dynamically in the **Gold Layer** against each facility's local calendar date (`to_date(from_utc_timestamp(current_timestamp(), timezone_name))`).
+
+---
+
+## ADR-005: Open-Meteo `minutely_15` Interpolation Nuance in Australia
+* **Context:** High-resolution native 15-minute NWP models on Open-Meteo (DWD ICON-D2, NOAA HRRR) cover Central Europe and North America. For Australia (covered by BOM ACCESS-G and ECMWF IFS), Open-Meteo returns `minutely_15` arrays by linearly interpolating 1-hour model grids (and dividing hourly precipitation by 4, rounded to `0.1 mm`).
+* **Decision:** Ingest and validate `bronze.weather_minutely_15` $\rightarrow$ `silver.fact_weather_minutely_15` for sub-hourly pipeline lineage completeness, while grounding Gold daily averages, rolling 7-day baselines, and clinical risk alerts strictly on native `hourly` and `daily` series.
+
+---
+
+## ADR-006: Data Archiving & AWS S3 Bucket Lifecycle Policies
+* **Context:** In production on AWS (S3 + Glue/Spark + Delta Lake), aged-care compliance requires up to 7 years (`2,555` days) of audit retention, while cloud storage costs must be minimized.
+* **Decision:** Reference policy defined in [s3_lifecycle_policy.json](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/config/s3_lifecycle_policy.json):
+  * **Landing Raw JSON (`landing/raw_json/`):** Standalone immutable files transition from `S3 Standard` (Days 0–30) $\rightarrow$ `S3 Glacier Instant Retrieval` (Days 31–90) $\rightarrow$ `S3 Glacier Deep Archive` (Days 91–2,555) $\rightarrow$ Permanent `Expiration` (Delete at Day 2,556).
+  * **Active Delta Lake Tables (`lakehouse/`):** Never apply raw object age expiration directly to active Delta prefixes (which would delete unchanged `dim_location_scd2` Parquet files still referenced by `_delta_log`!). Instead, apply **`S3 Intelligent-Tiering`** on active files + scheduled **`DELTA VACUUM RETAIN 168 HOURS`** + S3 `NoncurrentVersionExpiration` (14 days) to purge tombstoned files safely.

@@ -1,0 +1,62 @@
+{
+  "Rules": [
+    {
+      "ID": "LoopIQ-Landing-RawJSON-Tiering-And-Expiration",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "landing/raw_json/"
+      },
+      "Transitions": [
+        {
+          "Days": 30,
+          "StorageClass": "GLACIER_IR"
+        },
+        {
+          "Days": 90,
+          "StorageClass": "DEEP_ARCHIVE"
+        }
+      ],
+      "Expiration": {
+        "Days": 2555
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 14
+      }
+    },
+    {
+      "ID": "LoopIQ-Active-DeltaLake-IntelligentTiering-And-TombstonePurge",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "lakehouse/"
+      },
+      "Transitions": [
+        {
+          "Days": 0,
+          "StorageClass": "INTELLIGENT_TIERING"
+        }
+      ],
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 14
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    },
+    {
+      "ID": "LoopIQ-ColdArchive-DeltaPartitions-DeepArchive",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "archive/lakehouse/"
+      },
+      "Transitions": [
+        {
+          "Days": 1,
+          "StorageClass": "DEEP_ARCHIVE"
+        }
+      ],
+      "Expiration": {
+        "Days": 2555
+      }
+    }
+  ]
+}
