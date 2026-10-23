@@ -20,3 +20,12 @@ venv/
 dist/
 build/
 *.egg-info/
+
+.env
+.venv/
+AI_evidence.docx
+data/
+logs/
+src/
+tests/
+~WRL0244.tmp
