@@ -21,11 +21,7 @@ dist/
 build/
 *.egg-info/
 
-.env
-.venv/
+# Local Word / temp files
 AI_evidence.docx
-data/
-logs/
-src/
-tests/
-~WRL0244.tmp
+~WRL*.tmp
+~$*.docx
