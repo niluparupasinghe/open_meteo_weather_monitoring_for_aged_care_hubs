@@ -13,6 +13,7 @@ from src.ingestion.open_meteo_client import OpenMeteoClient
 from src.transformation.gold_transformer import GoldTransformer
 from src.transformation.silver_transformer import SilverTransformer
 from src.transformation.spark_session import build_spark_session
+from src.utils.email_notifier import send_pipeline_run_email
 from src.utils.logger import get_logger
 from src.utils.step_tracker import StepTracker
 
@@ -202,12 +203,13 @@ def execute_pipeline(
             tracker.run_step(step7_name, _step7, input_artifact_ref=run_id)
 
     finally:
-        # Always flush step audit events to ops.pipeline_step_execution_log Delta table
+        # Always flush step audit events to Delta and dispatch 7-step email report (SUCCESS or FAILED)
         try:
             ledger.flush_to_delta(spark)
             tracker.flush_to_delta(spark)
+            send_pipeline_run_email(tracker=tracker, ledger=ledger, settings=cfg)
         except Exception as flush_err:
-            logger.warning("Could not flush ops events to Delta: %s", flush_err)
+            logger.warning("Could not flush ops events or email notification: %s", flush_err)
 
     return {
         "pipeline_run_id": run_id,

@@ -28,8 +28,9 @@ An end-to-end, production-grade **Medallion Lakehouse data pipeline** built with
 * **Gold Layer Marts (Dynamic Facility-Local Horizon & Care Risk Alerting):**
   * Evaluates `is_forecast` and `data_horizon_type` (`PAST_MODELLED`, `TODAY_MIXED`, `FORWARD_FORECAST`) dynamically in Gold against each facility's local calendar date—keeping Silver free of time-variant boolean flags.
   * Generates actionable aged-care risk alerts (`NORMAL`, `WATCH`, `WARNING`, `CRITICAL`) with clinical care protocols in `gold.mart_care_facility_risk_alerts`.
-* **Step-Level Audit Logging & Checkpoint Repair Runner:**
+* **Step-Level Audit Logging, Checkpoint Repair Runner & 7-Step Run Email Notifications:**
   * Logs every step (`STARTED`, `SUCCESS`, `FAILED`, `SKIPPED_ON_REPAIR`) to `logs/pipeline_steps_audit.jsonl` and `ops.pipeline_step_execution_log`. Running `python -m src.cli repair --run-id <run_id>` automatically skips succeeded steps (reusing the landed raw JSON without re-calling the Open-Meteo API) and resumes from the failed step.
+  * Automatically generates a **7-Step HTML + Plain-Text Run Report** (`logs/emails/email_<run_id>.html`) after every run (`SUCCESS` or `FAILED` via [email_notifier.py](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/src/utils/email_notifier.py)) and dispatches it via SMTP when `ALERT_EMAIL_ENABLED=true` in `.env`.
 
 ---
 
