@@ -156,5 +156,20 @@ In a production deployment on AWS (`S3 + AWS Glue / Spark + Delta Lake`), storag
      * Run scheduled `VACUUM <table> RETAIN 168 HOURS` jobs to tombstone unreferenced Parquet files from `MERGE`/`OPTIMIZE` operations, paired with an S3 `NoncurrentVersionExpiration` rule (`14 days`) to permanently purge vacuumed object versions.
      * Offload historical fact partitions older than 2 years to `s3://<bucket>/archive/lakehouse/`, where S3 `DEEP_ARCHIVE` and `Expiration` at Day 2,555 safely apply.
 
+---
+
+## 5. Future Improvements & Production Roadmap
+
+1. **Hourly Exposure Duration & Peak-Hour Escalation in `gold.mart_care_facility_risk_alerts`:**
+   * **Current v1 Design Rationale:** In the current implementation, `gold.mart_care_facility_risk_alerts` evaluates daily extremes from `silver.fact_weather_daily` (`temp_max_c`, `temp_min_c`, `apparent_temp_max_c`, `wind_speed_max_kmh`, `uv_index_max`, and worst-case daily `weather_code`). Because Open-Meteo computes `daily` variables over each facility's local 24-hour day (`ADR-002`), those fields already capture the exact 24-hour worst-case peaks while keeping the alerting rules simple, deterministic, and aligned with daily nursing shift planning.
+   * **Phase 2 Enhancement (Joining `silver.fact_weather_hourly` for Persistence & Timing):** Two days can share the exact same daily maximum temperature (e.g., `temp_max_c = 36.0°C`) while posing very different clinical risks:
+     * *Day A (Brief Spike):* Crosses $35^\circ\text{C}$ for only **1 hour** at `14:00` before a coastal cool change drops temperatures to $23^\circ\text{C}$.
+     * *Day B (Sustained Heatwave):* Remains above $35^\circ\text{C}$ for **8 consecutive hours** (`11:00–18:00`) with warm overnight minimums that prevent passive building cooling.
+   * **Planned Calculation:** Roll up `silver.fact_weather_hourly` by `(location_id, observation_local_date)` to compute `heat_risk_hours_count` (`SUM(CASE WHEN temperature_2m_c >= 35.0 THEN 1 ELSE 0 END)`), `cold_risk_hours_count`, and the exact local clock hour of peak risk (`ARG_MAX(SUBSTRING(observation_local_time, 12, 5), temperature_2m_c)`), then join into `gold.mart_care_facility_risk_alerts` so short $1\text{--}3\text{ hour}$ spikes trigger a targeted **`WARNING`** while sustained $\ge 4\text{ hour}$ exposures automatically escalate to **`CRITICAL`**.
+2. **True Weather-Station Gauge Reconciliation (BOM AWS Observations):**
+   * Integrate physical Bureau of Meteorology (BOM) Automatic Weather Station (AWS) observations alongside Open-Meteo's NWP model reanalysis (`past_days=7`) to quantify forecast bias per care hub using Delta Lake's Change Data Feed (`_change_data`).
+3. **Automated Alert Dispatch (Webhook / PagerDuty / MS Teams):**
+   * Trigger outbound notifications for `CRITICAL` and `WARNING` rows in `gold.mart_care_facility_risk_alerts` where `data_horizon_type IN ('TODAY_MIXED', 'FORWARD_FORECAST')`.
+
 # open_meteo_weather_monitoring_for_aged_care_hubs
 In this repo, I have architected a pipelines to extract weather data from open meteo API and correlate with hypothetical aged care hubs around Australia. It will report any adverse weather expected for these hubs in coming days using this data and rules defined in the config file.
