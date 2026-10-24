@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import pyarrow as pa
@@ -16,6 +17,8 @@ from src.utils.logger import get_logger
 from src.utils.wmo_codes import VALID_WMO_CODES
 
 logger = get_logger(__name__)
+
+_SUPPORTS_ENGINE_ARG = "engine" in inspect.signature(write_deltalake).parameters
 
 QUARANTINE_ARROW_SCHEMA = pa.schema(
     [
@@ -62,7 +65,8 @@ class DataQualityValidator:
         }
         if (self.quarantine_path / "_delta_log").exists():
             write_kwargs["schema_mode"] = "merge"
-            write_kwargs["engine"] = "rust"
+            if _SUPPORTS_ENGINE_ARG:
+                write_kwargs["engine"] = "rust"
 
         write_deltalake(**write_kwargs)
         logger.warning(
