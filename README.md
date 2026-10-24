@@ -28,8 +28,9 @@ An end-to-end, production-grade **Medallion Lakehouse data pipeline** built with
 * **Gold Layer Marts (Dynamic Facility-Local Horizon & Care Risk Alerting):**
   * Evaluates `is_forecast` and `data_horizon_type` (`PAST_MODELLED`, `TODAY_MIXED`, `FORWARD_FORECAST`) dynamically in Gold against each facility's local calendar date—keeping Silver free of time-variant boolean flags.
   * Generates actionable aged-care risk alerts (`NORMAL`, `WATCH`, `WARNING`, `CRITICAL`) with clinical care protocols in `gold.mart_care_facility_risk_alerts`.
-* **Step-Level Audit Logging & Checkpoint Repair Runner:**
+* **Step-Level Audit Logging, Checkpoint Repair Runner & 7-Step Run Email Notifications:**
   * Logs every step (`STARTED`, `SUCCESS`, `FAILED`, `SKIPPED_ON_REPAIR`) to `logs/pipeline_steps_audit.jsonl` and `ops.pipeline_step_execution_log`. Running `python -m src.cli repair --run-id <run_id>` automatically skips succeeded steps (reusing the landed raw JSON without re-calling the Open-Meteo API) and resumes from the failed step.
+  * Automatically generates a **7-Step HTML + Plain-Text Run Report** (`logs/emails/email_<run_id>.html`) after every run (`SUCCESS` or `FAILED` via [email_notifier.py](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/src/utils/email_notifier.py)) and dispatches it via SMTP when `ALERT_EMAIL_ENABLED=true` in `.env`.
 
 ---
 
@@ -126,17 +127,52 @@ docker compose run --rm pipeline pytest -v
 ```
 
 ### Alternative: Running Directly via Local Python `.venv` (No Docker Required)
-Our Lakehouse engine supports both full PySpark (`pyspark + delta-spark`) and a zero-JVM native Rust/C++ Delta Lake + DuckDB engine (`deltalake + duckdb + pyarrow`), so you can also run the entire pipeline and test suite directly on Windows, macOS, or Linux without Docker:
+Our Lakehouse engine supports both full PySpark (`pyspark + delta-spark`) and a zero-JVM native Rust/C++ Delta Lake + DuckDB engine (`deltalake + duckdb + pyarrow`), so a teammate or reviewer can also run the entire pipeline and test suite directly on Windows, macOS, or Linux without Docker.
+
+Because `.venv/` is git-ignored, first create the virtual environment and install dependencies from `requirements.txt`:
+
+**On Windows (PowerShell):**
 ```powershell
-# Run the full 7-step pipeline:
+# 1. Create and activate the virtual environment, then install packages:
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# 2. Copy the environment configuration:
+Copy-Item .env.example .env
+
+# 3. Run the full 7-step pipeline:
 python -m src.cli run-all
 
-# Run the automated test suite:
+# 4. Run the automated test suite:
 pytest -v
 
-# Launch the Streamlit dashboard at http://localhost:8501:
+# 5. Launch the Streamlit dashboard (including the DuckDB SQL Workbench) at http://localhost:8501:
 streamlit run src/dashboard/app.py
 ```
+
+**On macOS / Linux (Bash / Zsh):**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python -m src.cli run-all
+pytest -v
+streamlit run src/dashboard/app.py
+```
+
+### Automated Test Suite Overview (`tests/` — 10 Tests)
+Running `pytest -v` executes 10 automated unit and integration tests inside isolated temporary directories (`tmp_path`, so your live `./data/` folder is never modified). Each test file validates a core architectural requirement:
+
+| Test File | What It Tests & Proves |
+| :--- | :--- |
+| **[`tests/test_api_weight_and_ledger.py`](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/tests/test_api_weight_and_ledger.py)** | **1. Call Weight Math:** Verifies `max(1.0, nDays/14) * max(1.0, nVars/10)` floor behavior and `16.8` weight for our 8-hub batch.<br/>**2. Payload Normalization:** Verifies single-location `dict` vs. multi-location `list` JSON handling.<br/>**3. Post-Consumption Ledger:** Proves `HTTP 200` logs `consumed_call_weight > 0`, `HTTP 429/500` logs `0.0`, and pre-flight rate-limit breaches abort before making an HTTP call. |
+| **[`tests/test_dq_and_quarantine.py`](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/tests/test_dq_and_quarantine.py)** | **Stage 1 & Stage 2 DQ Gate (13 Rules):** Injects corrupted records (array length mismatch `DQ-STRUCT-003`, out-of-range temperature `145°C`, `temp_max < temp_min` `DQ-LOGIC-001`, invalid WMO code `999` `DQ-DOM-001`) and verifies they are routed to `silver.quarantine_weather_records` while valid rows (including WMO code `97`) pass cleanly into Silver. |
+| **[`tests/test_silver_scd2_and_facts.py`](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/tests/test_silver_scd2_and_facts.py)** | **1. Time Semantics:** Verifies `observation_local_time` + `utc_offset_seconds` conversion to true `observation_time_utc`.<br/>**2. SCD Type 2 Rollover:** Updates a care hub's `climate_risk_tier` (`STANDARD` $\rightarrow$ `HIGH_HEAT`) and verifies the prior version is expired (`is_current = False`) and a new version is inserted (`is_current = True`).<br/>**3. SCD Type 1 (3-Guard Idempotent `MERGE`):** Replays the same batch and verifies zero duplicate rows and zero no-op updates. |
+| **[`tests/test_gold_marts.py`](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/tests/test_gold_marts.py)** | **Gold Marts & Dynamic Horizon:** Verifies local-date classification (`PAST_MODELLED`, `TODAY_MIXED`, `FORWARD_FORECAST`), 7-day rolling averages, and aged-care risk severity triggers (`CRITICAL`, `WARNING`, `WATCH`, `NORMAL`). |
+| **[`tests/test_step_repair.py`](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/tests/test_step_repair.py)** | **Step Audit & Checkpoint Repair:** Simulates a pipeline crash at `step_4_landing_to_bronze_daily`, verifies `FAILED` is logged, then runs `repair` and proves Steps 1–3 are marked `SKIPPED_ON_REPAIR` (without re-calling the Open-Meteo API) while Steps 4–7 complete to `SUCCESS`. |
+| **[`tests/test_email_notifier.py`](file:///d:/Personal/Jobs/2026/144%20Loop%20IQ/Assignment/tests/test_email_notifier.py)** | **7-Step Email Alerting:** Verifies that a failure at Step 3 renders all 7 steps in the HTML/text email (`1–2 SUCCESS`, `3 FAILED` with traceback + repair command, `4–7 NOT_RUN`) and tests SMTP dispatch via mock `smtplib.SMTP`. |
 
 ---
 
