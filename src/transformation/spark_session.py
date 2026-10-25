@@ -32,11 +32,13 @@ class LocalLakehouseSession:
         self.con = duckdb.connect()
         self.is_native_delta = True
 
-    def read_delta_pandas(self, path: str | Path) -> pd.DataFrame:
+    def read_delta_pandas(
+        self, path: str | Path, filters: Optional[List[Any]] = None
+    ) -> pd.DataFrame:
         p = Path(path)
         if not (p / "_delta_log").exists():
             return pd.DataFrame()
-        return DeltaTable(str(p)).to_pandas()
+        return DeltaTable(str(p)).to_pyarrow_table(filters=filters).to_pandas()
 
     def is_delta_table(self, path: str | Path) -> bool:
         return (Path(path) / "_delta_log").exists()

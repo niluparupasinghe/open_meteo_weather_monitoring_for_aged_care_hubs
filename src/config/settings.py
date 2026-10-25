@@ -97,7 +97,7 @@ class PipelineSettings(BaseSettings):
         default=Path("config/locations.json"), alias="LOCATIONS_CONFIG_PATH"
     )
 
-    # 4. Landing Zone, Lakehouse Storage & Spark / Delta Configuration
+    # 4. Landing Zone, Lakehouse Storage & Delta Configuration
     data_root_dir: Path = Field(default=Path("./data"), alias="DATA_ROOT_DIR")
     landing_raw_json_dir: Path = Field(
         default=Path("./data/landing/raw_json"), alias="LANDING_RAW_JSON_DIR"
@@ -106,8 +106,6 @@ class PipelineSettings(BaseSettings):
     bronze_path: Path = Field(default=Path("./data/lakehouse/bronze"), alias="BRONZE_PATH")
     silver_path: Path = Field(default=Path("./data/lakehouse/silver"), alias="SILVER_PATH")
     gold_path: Path = Field(default=Path("./data/lakehouse/gold"), alias="GOLD_PATH")
-    spark_master: str = Field(default="local[*]", alias="SPARK_MASTER")
-    spark_driver_memory: str = Field(default="2g", alias="SPARK_DRIVER_MEMORY")
     delta_enable_cdf: bool = Field(default=True, alias="DELTA_ENABLE_CDF")
 
     # 5. Data Quality, Archiving & Gold Alerting Thresholds

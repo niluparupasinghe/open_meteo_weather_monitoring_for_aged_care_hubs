@@ -27,9 +27,9 @@ Evaluated on each Bronze row (`bronze.weather_minutely_15`, `bronze.weather_hour
 
 | Rule ID | Rule Name | Target Bronze Input | Validation Logic / Predicate | Failure Action | Example Quarantined Condition |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`DQ-STRUCT-001`** | `NON_EMPTY_TIME_ARRAY` | `minutely_15`, `hourly`, `daily` | `time_array IS NOT NULL AND size(time_array) > 0` | Route entire location batch row to `silver.quarantine_weather_records` | Open-Meteo returned `"hourly": {"time": []}` for a location. |
-| **`DQ-STRUCT-002`** | `ARRAY_LENGTH_PARITY` | `minutely_15`, `hourly`, `daily` | Every metric array length must equal `size(time_array)` (e.g., `size(temperature_2m) == size(time)`) | Prevent `arrays_zip` misalignment; route malformed payload to quarantine | `size(hourly.time) = 336` but `size(hourly.temperature_2m) = 335`. |
-| **`DQ-STRUCT-003`** | `VALID_COORDINATE_AND_OFFSET` | All Bronze tables | `model_grid_latitude BETWEEN -90.0 AND 90.0 AND model_grid_longitude BETWEEN -180.0 AND 180.0 AND utc_offset_seconds BETWEEN -43200 AND 50400` | Route payload to quarantine | Corrupted JSON latitude `999.0` or missing `utc_offset_seconds`. |
+| **`DQ-STRUCT-001`** | `NON_EMPTY_TIME_ARRAY` | `minutely_15`, `hourly`, `daily` | `isinstance(time_array, list) and len(time_array) > 0` | Route entire location batch row to `silver.quarantine_weather_records` | Open-Meteo returned `"hourly": {"time": []}` for a location. |
+| **`DQ-STRUCT-002`** | `ARRAY_LENGTH_PARITY` | `minutely_15`, `hourly`, `daily` | Every metric array length must equal `len(time_array)` (e.g., `len(temperature_2m) == len(time)`) | Prevent parallel array index misalignment; route malformed payload to quarantine | `len(hourly.time) = 336` but `len(hourly.temperature_2m) = 335`. |
+| **`DQ-STRUCT-003`** | `VALID_COORDINATE_AND_OFFSET` | All Bronze tables | `model_grid_latitude BETWEEN -90.0 AND 90.0 AND model_grid_longitude BETWEEN -180.0 AND 180.0 AND utc_offset_seconds BETWEEN -43200 AND 50400` (and none are `NULL`) | Route payload to quarantine | Corrupted JSON latitude `999.0` or missing (`NULL`) `utc_offset_seconds`. |
 
 ---
 
@@ -53,11 +53,11 @@ Evaluated on every unnested time-series row prior to upserting into `silver.fact
 
 ## 3. How Failed Rows Populate `silver.quarantine_weather_records`
 
-When the Silver PySpark transformer runs:
-1. **Stage 1 Check:** Each Bronze location row is checked against `DQ-STRUCT-001`, `DQ-STRUCT-002`, and `DQ-STRUCT-003`. Any failing Bronze payload is immediately formatted and appended to `silver.quarantine_weather_records`.
-2. **Stage 2 Check:** Passing Bronze payloads are unnested via `arrays_zip` + `explode`. Each unnested row is evaluated against all applicable Stage 2 predicates (`DQ-KEY-001`, `DQ-PHY-*`, `DQ-LOGIC-001`, `DQ-DOM-001`).
-3. **Quarantine Write (`size(violated_rules) > 0`):** Invalid rows are written to `silver.quarantine_weather_records` with:
-   * `quarantine_id`: Deterministic/generated UUID.
+When the Silver transformer (`src/transformation/silver_transformer.py`) runs:
+1. **Stage 1 Check:** Each Bronze location row is checked against `DQ-STRUCT-001`, `DQ-STRUCT-002`, and `DQ-STRUCT-003`. Any failing Bronze payload is immediately formatted and routed to `silver.quarantine_weather_records`.
+2. **Stage 2 Check:** Passing Bronze payloads have their parallel JSON arrays unnested into individual time-series records. Each unnested row is evaluated against all applicable Stage 2 predicates (`DQ-KEY-001`, `DQ-PHY-*`, `DQ-LOGIC-001`, `DQ-DOM-001`).
+3. **Idempotent Quarantine Write (`len(rules) > 0`):** Invalid rows are written to `silver.quarantine_weather_records` (filtering out any existing `quarantine_id` so `repair` runs never create duplicate quarantine rows) with:
+   * `quarantine_id`: Deterministic SHA-256 hash of `pipeline_run_id || source_ingestion_id || raw_time_str || dq_rule_violated`.
    * `pipeline_run_id`: Active pipeline run ID.
    * `source_bronze_table`: `"bronze.weather_minutely_15"`, `"bronze.weather_hourly"`, or `"bronze.weather_daily"`.
    * `source_ingestion_id`: Lineage link back to the exact Bronze record.

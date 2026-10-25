@@ -51,7 +51,7 @@ FACT_MINUTELY_15_SCHEMA = pa.schema(
         pa.field("temperature_2m_c", pa.float64(), nullable=False),
         pa.field("precipitation_mm", pa.float64(), nullable=True),
         pa.field("wind_speed_10m_kmh", pa.float64(), nullable=True),
-        pa.field("weather_code", pa.int32(), nullable=True),
+        pa.field("weather_code", pa.int32(), nullable=False),
         pa.field("weather_description", pa.string(), nullable=False),
         pa.field("row_value_hash", pa.string(), nullable=False),
         pa.field("source_ingestion_id", pa.string(), nullable=False),
@@ -74,7 +74,7 @@ FACT_HOURLY_SCHEMA = pa.schema(
         pa.field("wind_speed_10m_kmh", pa.float64(), nullable=True),
         pa.field("surface_pressure_hpa", pa.float64(), nullable=True),
         pa.field("uv_index", pa.float64(), nullable=True),
-        pa.field("weather_code", pa.int32(), nullable=True),
+        pa.field("weather_code", pa.int32(), nullable=False),
         pa.field("weather_description", pa.string(), nullable=False),
         pa.field("row_value_hash", pa.string(), nullable=False),
         pa.field("source_ingestion_id", pa.string(), nullable=False),
@@ -95,7 +95,7 @@ FACT_DAILY_SCHEMA = pa.schema(
         pa.field("precipitation_sum_mm", pa.float64(), nullable=True),
         pa.field("wind_speed_max_kmh", pa.float64(), nullable=True),
         pa.field("uv_index_max", pa.float64(), nullable=True),
-        pa.field("weather_code", pa.int32(), nullable=True),
+        pa.field("weather_code", pa.int32(), nullable=False),
         pa.field("weather_description", pa.string(), nullable=False),
         pa.field("row_value_hash", pa.string(), nullable=False),
         pa.field("source_ingestion_id", pa.string(), nullable=False),
@@ -170,13 +170,12 @@ class SilverTransformer:
         bronze_subfolder: str,
         pipeline_run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Guard 1: Read only the target pipeline_run_id batch from Bronze so failed rows are not re-quarantined."""
+        """Guard 1: Push down pipeline_run_id predicate to delta-rs Parquet reader so failed rows are not re-quarantined."""
         path = self.settings.bronze_path / bronze_subfolder
         if not (path / "_delta_log").exists():
             return []
-        df = DeltaTable(str(path)).to_pandas()
-        if pipeline_run_id:
-            df = df[df["pipeline_run_id"] == pipeline_run_id]
+        filters = [("pipeline_run_id", "=", pipeline_run_id)] if pipeline_run_id else None
+        df = DeltaTable(str(path)).to_pyarrow_table(filters=filters).to_pandas()
         return df.to_dict(orient="records")
 
     # ==========================================================================
@@ -191,10 +190,18 @@ class SilverTransformer:
         if not bronze_rows:
             return {"rows_processed": 0, "rows_quarantined": 0}
 
-        # Deduplicate incoming location metadata to latest per location_id
+        # Deduplicate incoming location metadata to latest valid per location_id
         latest_by_loc: Dict[str, Dict[str, Any]] = {}
         for r in sorted(bronze_rows, key=lambda x: pd.Timestamp(x["ingested_at_utc"])):
+            if (
+                pd.isna(r.get("model_grid_latitude"))
+                or pd.isna(r.get("model_grid_longitude"))
+                or pd.isna(r.get("utc_offset_seconds"))
+            ):
+                continue
             latest_by_loc[str(r["location_id"])] = r
+        if not latest_by_loc:
+            return {"rows_processed": 0, "rows_quarantined": 0}
 
         far_future_utc = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
         staged_rows: List[Dict[str, Any]] = []

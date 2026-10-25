@@ -1,10 +1,10 @@
 .PHONY: setup build run verify repair test dashboard clean
 
-# Copy .env.example to .env if not already present
+# Copy .env.example to .env if not already present (cross-platform POSIX shell)
 setup:
-	@if not exist .env copy .env.example .env
+	@test -f .env || cp .env.example .env
 
-# Build the pre-warmed Docker image (Python 3.11 + OpenJDK 17 + PySpark + Delta JARs)
+# Build the Docker image (Python 3.11 + delta-rs + DuckDB + Streamlit)
 build:
 	docker compose build
 
@@ -28,6 +28,7 @@ test:
 dashboard:
 	docker compose up
 
-# Clean local runtime data and logs
+# Clean Docker containers and local runtime data/logs
 clean:
 	docker compose down -v --remove-orphans
+	rm -rf ./data ./logs

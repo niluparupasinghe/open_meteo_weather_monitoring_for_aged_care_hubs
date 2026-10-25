@@ -21,7 +21,6 @@ dist/
 build/
 *.egg-info/
 
-# Local Word / temp files
-AI_evidence.docx
+# Local Word lock / temporary files
 ~WRL*.tmp
-~$*.docx
+~$*

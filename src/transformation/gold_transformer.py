@@ -122,7 +122,9 @@ class GoldTransformer:
     # ==========================================================================
     # 1. Gold Mart: gold.mart_daily_weather_summary
     # ==========================================================================
-    def build_mart_daily_weather_summary(self) -> int:
+    def build_mart_daily_weather_summary(
+        self, now_utc: Optional[datetime] = None
+    ) -> int:
         """Build gold.mart_daily_weather_summary aligned on facility local date (Fix 2.1 & Section 3)."""
         cfg = self.settings
         dim_loc_tbl = DeltaTable(str(cfg.silver_path / "dim_location_scd2")).to_pyarrow_table()
@@ -214,7 +216,7 @@ class GoldTransformer:
         if df.empty:
             return 0
 
-        now_utc = datetime.now(timezone.utc)
+        eval_now_utc = now_utc or datetime.now(timezone.utc)
         df["observation_local_date"] = pd.to_datetime(df["observation_local_date"]).dt.date
         df["temp_anomaly_vs_7d_c"] = (
             df["hourly_avg_temp_c"] - df["rolling_7d_avg_temp_c"]
@@ -223,7 +225,7 @@ class GoldTransformer:
         is_forecast_list: List[bool] = []
         horizon_list: List[str] = []
         for _, row in df.iterrows():
-            local_today = self._facility_local_today(str(row["timezone_name"]), now_utc)
+            local_today = self._facility_local_today(str(row["timezone_name"]), eval_now_utc)
             obs_date = row["observation_local_date"]
             is_f = obs_date >= local_today
             is_forecast_list.append(is_f)
@@ -236,7 +238,7 @@ class GoldTransformer:
 
         df["is_forecast"] = is_forecast_list
         df["data_horizon_type"] = horizon_list
-        df["mart_updated_at_utc"] = now_utc
+        df["mart_updated_at_utc"] = eval_now_utc
 
         ordered_cols = [f.name for f in MART_DAILY_SUMMARY_SCHEMA]
         df = df[ordered_cols]
@@ -251,7 +253,9 @@ class GoldTransformer:
     # ==========================================================================
     # 2. Gold Mart: gold.mart_care_facility_risk_alerts
     # ==========================================================================
-    def build_mart_care_facility_risk_alerts(self) -> int:
+    def build_mart_care_facility_risk_alerts(
+        self, now_utc: Optional[datetime] = None
+    ) -> int:
         """Build gold.mart_care_facility_risk_alerts for Australian Aged Care hubs."""
         cfg = self.settings
         dim_loc_df = DeltaTable(str(cfg.silver_path / "dim_location_scd2")).to_pandas()
@@ -274,14 +278,14 @@ class GoldTransformer:
         if merged.empty:
             return 0
 
-        now_utc = datetime.now(timezone.utc)
+        eval_now_utc = now_utc or datetime.now(timezone.utc)
         alert_rows: List[Dict[str, Any]] = []
 
         for _, r in merged.iterrows():
             loc_id = str(r["location_id"])
             obs_date = pd.to_datetime(r["observation_local_date"]).date()
             tz_name = str(r["timezone_name"])
-            local_today = self._facility_local_today(tz_name, now_utc)
+            local_today = self._facility_local_today(tz_name, eval_now_utc)
 
             is_forecast = obs_date >= local_today
             if obs_date < local_today:
@@ -394,7 +398,7 @@ class GoldTransformer:
                         else "Standard routine resident care & environmental monitoring"
                     ),
                     "source_ingestion_id": str(r["source_ingestion_id"]),
-                    "evaluated_at_utc": now_utc,
+                    "evaluated_at_utc": eval_now_utc,
                 }
             )
 
@@ -406,8 +410,8 @@ class GoldTransformer:
             arrow_schema=MART_RISK_ALERTS_SCHEMA,
         )
 
-    def build_all_marts(self) -> Dict[str, int]:
+    def build_all_marts(self, now_utc: Optional[datetime] = None) -> Dict[str, int]:
         """Build both Gold analytical marts and return total processed rows."""
-        c1 = self.build_mart_daily_weather_summary()
-        c2 = self.build_mart_care_facility_risk_alerts()
+        c1 = self.build_mart_daily_weather_summary(now_utc=now_utc)
+        c2 = self.build_mart_care_facility_risk_alerts(now_utc=now_utc)
         return {"rows_processed": c1 + c2, "rows_quarantined": 0}
