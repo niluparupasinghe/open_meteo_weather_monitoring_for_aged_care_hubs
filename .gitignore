@@ -20,3 +20,8 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# Local Word / temp files
+AI_evidence.docx
+~WRL*.tmp
+~$*.docx

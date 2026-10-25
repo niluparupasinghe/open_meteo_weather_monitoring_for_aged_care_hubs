@@ -196,8 +196,9 @@ Every Silver fact table enforces three idempotency guards:
 
 ### 3.2 Table: `silver.fact_weather_minutely_15`
 * **Objective:** Conformed 15-minute grain weather time-series unnested from `bronze.weather_minutely_15`, preserving both the facility's local timestamp/date and true UTC timestamp (`observation_local_time - utc_offset_seconds`).
-* **Storage Format & Update Strategy:** Delta Lake (3-guard `MERGE INTO` on `(location_id, observation_time_utc)` with `delta.enableChangeDataFeed = true`, partitioned by `observation_local_date`).
-* **Grain:** One row per `(location_id, observation_time_utc)`.
+* **Storage Format & Update Strategy:** **Delta Lake — SCD Type 1 Upsert (3-Guard `MERGE INTO` + Change Data Feed `delta.enableChangeDataFeed = true`)**, partitioned by `observation_local_date`.
+  * *Sliding 14-Day Window Lifecycle (`ADR-003`):* Older history ($< T-7$) is untouched and retained permanently; overlapping timestamps ($[T-7, T+5]$) are updated in-place (`WHEN MATCHED`) when newer forecasts or assimilated actuals differ in `row_value_hash` (with prior versions logged in Delta CDF `_change_data`); new horizon timestamps ($T+6$) are appended (`WHEN NOT MATCHED THEN INSERT`).
+* **Grain:** One row per `(location_id, observation_local_time)` / `(location_id, observation_time_utc)`.
 
 | Column Name | Data Type | Nullable | Origin / Source | Description & How Obtained / Created | Example Value |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -219,8 +220,9 @@ Every Silver fact table enforces three idempotency guards:
 
 ### 3.3 Table: `silver.fact_weather_hourly`
 * **Objective:** Conformed 1-hour grain weather time-series unnested from `bronze.weather_hourly`, storing both facility local date/time and true UTC time (`observation_time_utc`).
-* **Storage Format & Update Strategy:** Delta Lake (3-guard `MERGE INTO` on `(location_id, observation_time_utc)` with `delta.enableChangeDataFeed = true`, partitioned by `observation_local_date`).
-* **Grain:** One row per `(location_id, observation_time_utc)`.
+* **Storage Format & Update Strategy:** **Delta Lake — SCD Type 1 Upsert (3-Guard `MERGE INTO` + Change Data Feed `delta.enableChangeDataFeed = true`)**, partitioned by `observation_local_date`.
+  * *Sliding 14-Day Window Lifecycle (`ADR-003`):* Older history ($< T-7$) is untouched and retained permanently; overlapping timestamps ($[T-7, T+5]$) are updated in-place (`WHEN MATCHED`) when newer forecasts or assimilated actuals differ in `row_value_hash` (with prior versions logged in Delta CDF `_change_data`); new horizon timestamps ($T+6$) are appended (`WHEN NOT MATCHED THEN INSERT`).
+* **Grain:** One row per `(location_id, observation_local_time)` / `(location_id, observation_time_utc)`.
 
 | Column Name | Data Type | Nullable | Origin / Source | Description & How Obtained / Created | Example Value |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -247,7 +249,8 @@ Every Silver fact table enforces three idempotency guards:
 
 ### 3.4 Table: `silver.fact_weather_daily`
 * **Objective:** Conformed daily grain weather time-series unnested from `bronze.weather_daily` (aggregated over each facility's local 24h calendar day `observation_local_date`), enriched with derived diurnal temperature swing.
-* **Storage Format & Update Strategy:** Delta Lake (3-guard `MERGE INTO` on `(location_id, observation_local_date)` with `delta.enableChangeDataFeed = true`).
+* **Storage Format & Update Strategy:** **Delta Lake — SCD Type 1 Upsert (3-Guard `MERGE INTO` + Change Data Feed `delta.enableChangeDataFeed = true`)** on `(location_id, observation_local_date)`.
+  * *Sliding 14-Day Window Lifecycle (`ADR-003`):* Older history ($< T-7$) is untouched and retained permanently; overlapping dates ($[T-7, T+5]$) are updated in-place (`WHEN MATCHED`) when newer forecasts or assimilated actuals differ in `row_value_hash` (with prior versions logged in Delta CDF `_change_data`); the new forward horizon date ($T+6$) is appended (`WHEN NOT MATCHED THEN INSERT`).
 * **Grain:** One row per `(location_id, observation_local_date)`.
 
 | Column Name | Data Type | Nullable | Origin / Source | Description & How Obtained / Created | Example Value |

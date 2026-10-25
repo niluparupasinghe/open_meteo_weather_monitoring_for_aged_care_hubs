@@ -128,6 +128,16 @@ class PipelineSettings(BaseSettings):
     archive_warm_retention_days: int = Field(default=90, alias="ARCHIVE_WARM_RETENTION_DAYS")
     archive_cold_expiration_days: int = Field(default=2555, alias="ARCHIVE_COLD_EXPIRATION_DAYS")
 
+    # 6. Pipeline Run Email Notification Configuration
+    alert_email_enabled: bool = Field(default=False, alias="ALERT_EMAIL_ENABLED")
+    smtp_host: str = Field(default="smtp.gmail.com", alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_use_tls: bool = Field(default=True, alias="SMTP_USE_TLS")
+    smtp_username: Optional[str] = Field(default=None, alias="SMTP_USERNAME")
+    smtp_password: Optional[str] = Field(default=None, alias="SMTP_PASSWORD")
+    alert_email_from: Optional[str] = Field(default=None, alias="ALERT_EMAIL_FROM")
+    alert_email_to: Optional[str] = Field(default=None, alias="ALERT_EMAIL_TO")
+
     @field_validator("weather_cell_selection")
     @classmethod
     def validate_cell_selection(cls, v: str) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import uuid
 from pathlib import Path
@@ -16,6 +17,8 @@ from src.config.settings import PipelineSettings, get_settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_SUPPORTS_ENGINE_ARG = "engine" in inspect.signature(write_deltalake).parameters
 
 
 class BronzeWriter:
@@ -145,7 +148,8 @@ class BronzeWriter:
         }
         if (target_path / "_delta_log").exists():
             write_kwargs["schema_mode"] = "merge"
-            write_kwargs["engine"] = "rust"
+            if _SUPPORTS_ENGINE_ARG:
+                write_kwargs["engine"] = "rust"
 
         write_deltalake(**write_kwargs)
         logger.info("Appended %d rows to bronze.%s at %s", len(rows), table_folder, target_path)

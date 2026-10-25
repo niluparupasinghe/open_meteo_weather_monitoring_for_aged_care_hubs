@@ -19,17 +19,50 @@
 
 ---
 
-## ADR-003: Three-Guard Idempotent Silver `MERGE INTO` & Clean Change Data Feed (CDF)
-* **Context:** Unconditional `MERGE INTO` statements or full Bronze table rescans cause duplicate quarantine rows, allow out-of-order replays to overwrite newer forecasts, and flood Delta Lake's Change Data Feed (`_change_data`) with millions of no-op `update_postimage` records.
-* **Decision:** Enforce three strict guards on every Silver fact `MERGE`:
-  1. **Guard 1 (Incremental Read):** Filter Bronze by the active `pipeline_run_id` so failed rows are evaluated and quarantined once per batch.
-  2. **Guard 2 (Source Deduplication):** Deduplicate candidate rows on primary key via `ROW_NUMBER() OVER (PARTITION BY <keys> ORDER BY api_ingested_at_utc DESC) = 1`.
-  3. **Guard 3 (Newer-Only & Value-Changed Update):**
-     ```sql
-     WHEN MATCHED AND src.api_ingested_at_utc >= tgt.api_ingested_at_utc
-                  AND src.row_value_hash != tgt.row_value_hash
-     THEN UPDATE SET *
-     ```
+## ADR-003: Hybrid Dimensional Strategy — SCD Type 2 for Locations vs. SCD Type 1 (`3-Guard MERGE` + CDF) for Sliding 14-Day Weather Facts
+
+### 1. Context & Architectural Trade-Off (SCD2 vs. SCD1 + CDF)
+Every pipeline execution on Run Day $T$ fetches a **sliding 14-day window** (`past_days=7` + `forecast_days=7`, covering local dates $[T-7, T+6]$) across 8 care hubs:
+* **`silver.dim_location_scd2` (SCD Type 2):** Facility metadata (`climate_risk_tier`, `location_name`, snapped grid coordinates) is low-cardinality (`8` hubs) and changes infrequently (e.g., after an annual clinical risk audit). **SCD Type 2** (`effective_from_utc`, `effective_to_utc`, `is_current`) is ideal here so historical changes to a facility's risk tier are preserved as explicit dimension rows.
+* **`silver.fact_weather_minutely_15`, `silver.fact_weather_hourly`, `silver.fact_weather_daily` (SCD Type 1 Upsert + Delta Change Data Feed):**
+  * **Why NOT SCD Type 2 on Weather Facts:** Because each daily API call re-fetches a 14-day window (`10,752` 15-minute rows + `2,688` hourly rows + `112` daily rows per run), modeling weather facts as SCD Type 2 would create up to **14 duplicate version rows per timestamp**, inflating table volume by $14\times$ and forcing every downstream Gold aggregation and window function (`AVG(...) OVER (ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`) to filter `WHERE is_current = true`.
+  * **Why SCD Type 1 + Delta Change Data Feed (`CDF`) Wins:** Using **SCD Type 1 (`MERGE INTO`)** on the natural grain (`(location_id, observation_local_time)` or `(location_id, observation_local_date)`) guarantees **strictly one authoritative row per facility per timestamp** in the active Silver tables. Meanwhile, enabling **Delta Change Data Feed (`delta.enableChangeDataFeed = true`)** and Delta Time Travel (`_delta_log`), backed by our append-only Bronze tables, still preserves the complete pre-image and post-image (`_change_type IN ('update_preimage', 'update_postimage')`) of every forecast revision for audit or forecast-accuracy analysis.
+
+### 2. Sliding 14-Day Window Lifecycle Across Consecutive Runs
+When the pipeline runs on **Day $T$** (after having previously run on Day $T-1$, which loaded $[T-8, T+5]$), the SCD Type 1 `MERGE INTO` handles the timeline in three distinct segments:
+
+```mermaid
+flowchart LR
+    subgraph SegA["Segment A: Older History (< T-7)"]
+        A["Dates <= T-8<br/>(Already in Silver)"] --> A_ACT["Untouched by MERGE<br/>(No DELETE clause)<br/>Permanently retained as<br/>historical time-series"]
+    end
+
+    subgraph SegB["Segment B: Overlapping 13-Day Window (T-7 to T+5)"]
+        B["1. Forecast -> Actuals (T-7 to T-1)<br/>2. Revised Forecasts (T to T+5)"] --> B_ACT["WHEN MATCHED THEN UPDATE<br/>(SCD Type 1 In-Place Upsert)<br/>Overwrites only if newer &<br/>row_value_hash changed;<br/>prior version logged in CDF"]
+    end
+
+    subgraph SegC["Segment C: New Forward Horizon (Day T+6)"]
+        C["Newly visible 7th<br/>forecast day (T+6)"] --> C_ACT["WHEN NOT MATCHED THEN INSERT<br/>Appends 96 (15m), 24 (1h),<br/>and 1 (daily) rows per hub"]
+    end
+```
+
+| Timeline Segment (Run on Day $T$) | Date Range | What Changed in the API? | SCD Type 1 `MERGE INTO` Action in Silver | Downstream Impact |
+| :--- | :--- | :--- | :--- | :--- |
+| **Segment A: Older History** | $< T-7$ (e.g., $\le T-8$) | Outside the current `past_days=7` API request window; no longer returned by today's API call. | **Untouched (Retained Permanently):** Because our `MERGE` intentionally omits `WHEN NOT MATCHED BY SOURCE THEN DELETE`, rows older than 7 days remain intact in Silver. | Over weeks and months, Silver automatically accumulates a continuous, multi-year historical weather archive. |
+| **Segment B: Overlapping Window** | $[T-7, T+5]$ (13 overlapping days) | **1. Forecast $\rightarrow$ Actuals:** Yesterday's forecast for $T-1$ is now assimilated past-modelled history.<br/>**2. Forecast Revisions:** Forecasts for $[T, T+5]$ are updated with the latest NWP model run. | **`WHEN MATCHED` (SCD Type 1 Update):** Overwrites the existing row in-place **only** if `src.api_ingested_at_utc >= tgt.api_ingested_at_utc` **and** `src.row_value_hash != tgt.row_value_hash`. | Gold queries see the latest authoritative measurement/forecast per timestamp without duplicates; prior forecast revisions remain queryable via Delta CDF (`_change_data`). |
+| **Segment C: New Horizon** | $T+6$ (1 new future day) | Newly entered 7th forward forecast day that was not in yesterday's $[T-8, T+5]$ window. | **`WHEN NOT MATCHED THEN INSERT`:** Appends `96` 15-minute rows, `24` hourly rows, and `1` daily row per care hub. | Extends the forward alerting horizon by 24 hours. |
+
+### 3. Three Idempotency Guards on Every Silver SCD Type 1 `MERGE`
+To ensure that re-running or repairing a pipeline batch is 100% idempotent, every Silver fact `MERGE` enforces three guards:
+1. **Guard 1 (Incremental Read):** Filter Bronze by the active `pipeline_run_id` so failed rows are evaluated and quarantined once per batch.
+2. **Guard 2 (Source Deduplication):** Deduplicate candidate rows on primary key via `ROW_NUMBER() OVER (PARTITION BY <keys> ORDER BY api_ingested_at_utc DESC) = 1`.
+3. **Guard 3 (Newer-Only & Value-Changed Update):**
+   ```sql
+   WHEN MATCHED AND src.api_ingested_at_utc >= tgt.api_ingested_at_utc
+                AND src.row_value_hash != tgt.row_value_hash
+   THEN UPDATE SET *
+   ```
+   This prevents out-of-order replays of older landed files from overwriting newer forecasts and prevents unchanged rows in Segment B from generating noisy no-op `update_postimage` commits in Delta's Change Data Feed.
 
 ---
 
