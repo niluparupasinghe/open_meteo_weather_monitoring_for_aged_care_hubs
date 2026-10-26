@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pandas as pd
 from deltalake import DeltaTable
@@ -41,15 +42,27 @@ def test_gold_marts_horizon_and_risk_alerts(
     st.transform_all_facts(pipeline_run_id="run-gold")
 
     gt = GoldTransformer(spark, isolated_settings)
-    res = gt.build_all_marts()
+    # Inject fixed UTC instant: 2026-10-22 14:00:00 UTC == 2026-10-23 01:00:00 AEDT in Sydney (Australia/Sydney)
+    fixed_now_utc = datetime(2026, 10, 22, 14, 0, 0, tzinfo=timezone.utc)
+    res = gt.build_all_marts(now_utc=fixed_now_utc)
     assert res["rows_processed"] == 12  # 6 daily summary rows + 6 risk alert rows
 
     summary_df = DeltaTable(
         str(isolated_settings.gold_path / "mart_daily_weather_summary")
     ).to_pandas()
     assert "peak_15m_precip_mm" not in summary_df.columns
-    horizons = set(summary_df["data_horizon_type"])
-    assert horizons.issubset({"PAST_MODELLED", "TODAY_MIXED", "FORWARD_FORECAST"})
+    summary_df["obs_str"] = pd.to_datetime(summary_df["observation_local_date"]).dt.strftime(
+        "%Y-%m-%d"
+    )
+
+    # Verify exact per-facility timezone boundary classification for Sydney (local today = 2026-10-23):
+    syd_summary = summary_df[summary_df["location_id"] == "AU-NSW-SYD-01"].set_index("obs_str")
+    assert syd_summary.loc["2026-10-22", "data_horizon_type"] == "PAST_MODELLED"
+    assert bool(syd_summary.loc["2026-10-22", "is_forecast"]) is False
+    assert syd_summary.loc["2026-10-23", "data_horizon_type"] == "TODAY_MIXED"
+    assert bool(syd_summary.loc["2026-10-23", "is_forecast"]) is True
+    assert syd_summary.loc["2026-10-24", "data_horizon_type"] == "FORWARD_FORECAST"
+    assert bool(syd_summary.loc["2026-10-24", "is_forecast"]) is True
 
     alerts_df = DeltaTable(
         str(isolated_settings.gold_path / "mart_care_facility_risk_alerts")

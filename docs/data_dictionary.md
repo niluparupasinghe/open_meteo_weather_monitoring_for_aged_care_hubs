@@ -9,7 +9,7 @@ Every column specifies one of five origins:
 1. **`[API Response]`**: Extracted directly from the Open-Meteo `/v1/forecast` JSON response (exact JSON path provided).
 2. **`[Seed Config: locations.json]`**: Loaded from our local facility registry file (`config/locations.json`), which supplies business context (`location_id`, `location_name`, `state_code`, `timezone_name`, `climate_risk_tier`).
 3. **`[.env Config]`**: Controlled by runtime environment variables in `.env`.
-4. **`[Pipeline Derived]`**: Computed by our Python/PySpark transformation logic using a deterministic formula, hash, or lookup table.
+4. **`[Pipeline Derived]`**: Computed by our Python / DuckDB / Delta Lake transformation logic using a deterministic formula, hash, or lookup table.
 5. **`[System Metadata]`**: Generated at runtime by the execution engine (UUIDs, UTC timestamps, HTTP status codes, file paths).
 
 ---
@@ -84,11 +84,11 @@ When Open-Meteo responds, we request each facility's local IANA timezone (`timez
 | `state_code` | `STRING` | `NO` | `[Seed Config: locations.json]` | Read from `config/locations.json` (`locations[i].state_code`). | `"NSW"` |
 | `climate_risk_tier` | `STRING` | `NO` | `[Seed Config: locations.json]` | Read from `config/locations.json` (`locations[i].climate_risk_tier`). | `"STANDARD"` |
 | `timezone_name` | `STRING` | `NO` | `[Seed Config: locations.json]` | Local IANA timezone from `config/locations.json` (`locations[i].timezone_name`), confirmed by `response[i].timezone`. | `"Australia/Sydney"` |
-| `utc_offset_seconds` | `INT` | `NO` | `[API Response]` | Extracted from top-level `response[i].utc_offset_seconds` (e.g., `39600` for AEDT `UTC+11`, `34200` for Darwin `UTC+9:30`). Used in Silver to convert local timestamps to true UTC. | `39600` |
+| `utc_offset_seconds` | `INT` | `YES` | `[API Response]` | Extracted from top-level `response[i].utc_offset_seconds` (e.g., `39600` for AEDT `UTC+11`, `34200` for Darwin `UTC+9:30`; `NULL` if missing so `DQ-STRUCT-003` quarantines the record). Used in Silver to convert local timestamps to true UTC. | `39600` |
 | `requested_latitude` | `DOUBLE` | `NO` | `[Seed Config: locations.json]` | Exact WGS84 latitude sent in the API request (`locations[i].latitude`). | `-33.8688` |
 | `requested_longitude` | `DOUBLE` | `NO` | `[Seed Config: locations.json]` | Exact WGS84 longitude sent in the API request (`locations[i].longitude`). | `151.2093` |
-| `model_grid_latitude` | `DOUBLE` | `NO` | `[API Response]` | Extracted from `response[i].latitude` (snapped weather model grid coordinate). | `-33.85` |
-| `model_grid_longitude` | `DOUBLE` | `NO` | `[API Response]` | Extracted from `response[i].longitude`. | `151.20` |
+| `model_grid_latitude` | `DOUBLE` | `YES` | `[API Response]` | Extracted from `response[i].latitude` (snapped weather model grid coordinate; `NULL` if missing). | `-33.85` |
+| `model_grid_longitude` | `DOUBLE` | `YES` | `[API Response]` | Extracted from `response[i].longitude` (`NULL` if missing). | `151.20` |
 | `elevation_m` | `DOUBLE` | `YES` | `[API Response]` | Extracted from `response[i].elevation`. | `42.0` |
 | `minutely_15_units_json` | `STRING` | `NO` | `[API Response]` | Serialized JSON string of `response[i].minutely_15_units`. | `'{"time":"iso8601","temperature_2m":"°C",...}'` |
 | `minutely_15_payload_json` | `STRING` | `NO` | `[API Response]` | Serialized JSON string of `response[i].minutely_15` containing parallel arrays in facility local time. | `'{"time":["2026-10-16T00:00","2026-10-16T00:15",...],"temperature_2m":[17.2,17.1,...]}'` |
@@ -114,11 +114,11 @@ When Open-Meteo responds, we request each facility's local IANA timezone (`timez
 | `state_code` | `STRING` | `NO` | `[Seed Config: locations.json]` | Read from `config/locations.json` (`locations[i].state_code`). | `"NSW"` |
 | `climate_risk_tier` | `STRING` | `NO` | `[Seed Config: locations.json]` | Read from `config/locations.json` (`locations[i].climate_risk_tier`). | `"STANDARD"` |
 | `timezone_name` | `STRING` | `NO` | `[Seed Config: locations.json]` | Local IANA timezone from `config/locations.json` (`locations[i].timezone_name`). | `"Australia/Sydney"` |
-| `utc_offset_seconds` | `INT` | `NO` | `[API Response]` | Extracted from `response[i].utc_offset_seconds`. | `39600` |
+| `utc_offset_seconds` | `INT` | `YES` | `[API Response]` | Extracted from `response[i].utc_offset_seconds` (`NULL` if missing from API payload). | `39600` |
 | `requested_latitude` | `DOUBLE` | `NO` | `[Seed Config: locations.json]` | Configured facility latitude (`locations[i].latitude`). | `-33.8688` |
 | `requested_longitude` | `DOUBLE` | `NO` | `[Seed Config: locations.json]` | Configured facility longitude (`locations[i].longitude`). | `151.2093` |
-| `model_grid_latitude` | `DOUBLE` | `NO` | `[API Response]` | Extracted from Open-Meteo `response[i].latitude`. | `-33.85` |
-| `model_grid_longitude` | `DOUBLE` | `NO` | `[API Response]` | Extracted from Open-Meteo `response[i].longitude`. | `151.20` |
+| `model_grid_latitude` | `DOUBLE` | `YES` | `[API Response]` | Extracted from Open-Meteo `response[i].latitude` (`NULL` if missing). | `-33.85` |
+| `model_grid_longitude` | `DOUBLE` | `YES` | `[API Response]` | Extracted from Open-Meteo `response[i].longitude` (`NULL` if missing). | `151.20` |
 | `elevation_m` | `DOUBLE` | `YES` | `[API Response]` | Extracted from Open-Meteo `response[i].elevation`. | `42.0` |
 | `hourly_units_json` | `STRING` | `NO` | `[API Response]` | Serialized JSON string of `response[i].hourly_units`. | `'{"time":"iso8601","temperature_2m":"°C",...}'` |
 | `hourly_payload_json` | `STRING` | `NO` | `[API Response]` | Serialized JSON string of `response[i].hourly` containing the parallel hourly arrays in facility local time. | `'{"time":["2026-10-16T00:00",...],"temperature_2m":[17.2,...]}'` |
@@ -144,11 +144,11 @@ When Open-Meteo responds, we request each facility's local IANA timezone (`timez
 | `state_code` | `STRING` | `NO` | `[Seed Config: locations.json]` | Read from `config/locations.json` (`locations[i].state_code`). | `"NSW"` |
 | `climate_risk_tier` | `STRING` | `NO` | `[Seed Config: locations.json]` | Read from `config/locations.json` (`locations[i].climate_risk_tier`). | `"STANDARD"` |
 | `timezone_name` | `STRING` | `NO` | `[Seed Config: locations.json]` | Local IANA timezone from `config/locations.json` (`locations[i].timezone_name`). | `"Australia/Sydney"` |
-| `utc_offset_seconds` | `INT` | `NO` | `[API Response]` | Extracted from `response[i].utc_offset_seconds`. | `39600` |
+| `utc_offset_seconds` | `INT` | `YES` | `[API Response]` | Extracted from `response[i].utc_offset_seconds` (`NULL` if missing from API payload). | `39600` |
 | `requested_latitude` | `DOUBLE` | `NO` | `[Seed Config: locations.json]` | Configured facility latitude (`locations[i].latitude`). | `-33.8688` |
 | `requested_longitude` | `DOUBLE` | `NO` | `[Seed Config: locations.json]` | Configured facility longitude (`locations[i].longitude`). | `151.2093` |
-| `model_grid_latitude` | `DOUBLE` | `NO` | `[API Response]` | Extracted from Open-Meteo `response[i].latitude`. | `-33.85` |
-| `model_grid_longitude` | `DOUBLE` | `NO` | `[API Response]` | Extracted from Open-Meteo `response[i].longitude`. | `151.20` |
+| `model_grid_latitude` | `DOUBLE` | `YES` | `[API Response]` | Extracted from Open-Meteo `response[i].latitude` (`NULL` if missing). | `-33.85` |
+| `model_grid_longitude` | `DOUBLE` | `YES` | `[API Response]` | Extracted from Open-Meteo `response[i].longitude` (`NULL` if missing). | `151.20` |
 | `elevation_m` | `DOUBLE` | `YES` | `[API Response]` | Extracted from Open-Meteo `response[i].elevation`. | `42.0` |
 | `daily_units_json` | `STRING` | `NO` | `[API Response]` | Serialized JSON string of `response[i].daily_units`. | `'{"time":"iso8601","temperature_2m_max":"°C",...}'` |
 | `daily_payload_json` | `STRING` | `NO` | `[API Response]` | Serialized JSON string of `response[i].daily` containing parallel daily arrays aggregated over each facility's local 24h calendar day. | `'{"time":["2026-10-16",...],"temperature_2m_max":[24.1,...]}'` |
@@ -163,9 +163,9 @@ When Open-Meteo responds, we request each facility's local IANA timezone (`timez
 
 ### Three-Guard Idempotent `MERGE INTO` Architecture
 Every Silver fact table enforces three idempotency guards:
-1. **Incremental Read:** Processes only Bronze rows from the current `pipeline_run_id` (or `ingested_at_utc > watermark`) so failed rows are quarantined once.
-2. **Source Deduplication:** Deduplicates incoming rows by primary grain ordered by `api_ingested_at_utc DESC` via `ROW_NUMBER() = 1`.
-3. **Newer-Only & Value-Changed Update:** `WHEN MATCHED AND src.api_ingested_at_utc >= tgt.api_ingested_at_utc AND src.row_value_hash != tgt.row_value_hash THEN UPDATE SET *` — preventing older replays from clobbering newer forecasts and keeping Delta Change Data Feed (`_change_data`) free of no-op updates.
+1. **Incremental Read:** Pushes `filters=[("pipeline_run_id", "=", pipeline_run_id)]` down to the `delta-rs` Parquet reader so only Bronze rows from the current `pipeline_run_id` are processed and failed rows are quarantined once.
+2. **Source Deduplication:** Deduplicates incoming rows by primary grain ordered by `api_ingested_at_utc` ascending (retaining the latest `api_ingested_at_utc` per key).
+3. **Newer-Only & Value-Changed Update:** `WHEN MATCHED AND src.api_ingested_at_utc >= tgt.api_ingested_at_utc AND src.row_value_hash != tgt.row_value_hash THEN UPDATE SET *` — preventing older replays from clobbering newer forecasts and avoiding no-op updates.
 
 ### 3.1 Table: `silver.dim_location_scd2`
 * **Objective:** Slowly Changing Dimension Type 2 (SCD2) table combining business facility attributes from `config/locations.json` with resolved meteorological grid metadata (`model_grid_latitude`, `model_grid_longitude`, `elevation_m`, `utc_offset_seconds`) from Bronze.
@@ -174,7 +174,7 @@ Every Silver fact table enforces three idempotency guards:
 
 | Column Name | Data Type | Nullable | Origin / Source | Description & How Obtained / Created | Example Value |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `location_sk` | `STRING` | `NO` | `[Pipeline Derived]` | Surrogate primary key computed as `sha2(concat_ws('||', location_id, cast(effective_from_utc as string)), 256)`. | `"8f9d2a1c4b6e7f0a123456789abcdef0..."` |
+| `location_sk` | `STRING` | `NO` | `[Pipeline Derived]` | Surrogate primary key computed via Python `hashlib.sha256(f"{location_id}||{effective_from_utc.isoformat()}".encode()).hexdigest()`. | `"8f9d2a1c4b6e7f0a123456789abcdef0..."` |
 | `location_id` | `STRING` | `NO` | `[Seed Config: locations.json]` | Natural business key propagated from `bronze.weather_hourly.location_id`. | `"AU-NSW-SYD-01"` |
 | `location_name` | `STRING` | `NO` | `[Seed Config: locations.json]` | Human-readable facility hub name propagated from `config/locations.json`. | `"Sydney Metro Care Hub"` |
 | `state_code` | `STRING` | `NO` | `[Seed Config: locations.json]` | Australian state/territory code propagated from `config/locations.json`. | `"NSW"` |
@@ -204,17 +204,17 @@ Every Silver fact table enforces three idempotency guards:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `location_id` | `STRING` | `NO` | `[Seed Config: locations.json]` | Propagated from `bronze.weather_minutely_15.location_id`. | `"AU-NSW-SYD-01"` |
 | `observation_local_time` | `STRING` | `NO` | `[API Response]` | Local ISO8601 timestamp string `minutely_15.time[k]` in the facility's local timezone. | `"2026-10-23T15:15"` |
-| `observation_local_date` | `DATE` | `NO` | `[Pipeline Derived]` | Derived as `to_date(observation_local_time, "yyyy-MM-dd'T'HH:mm")` — the facility's true local calendar date (partition & join key). | `2026-10-23` |
-| `observation_time_utc` | `TIMESTAMP` | `NO` | `[Pipeline Derived]` | True UTC instant computed by converting `observation_local_time` minus `utc_offset_seconds`: `timestamp_seconds(unix_timestamp(observation_local_time, "yyyy-MM-dd'T'HH:mm") - utc_offset_seconds)`. | `2026-10-23 04:15:00.000 UTC` |
+| `observation_local_date` | `DATE` | `NO` | `[Pipeline Derived]` | Derived via `datetime.strptime(observation_local_time, "%Y-%m-%dT%H:%M").date()` — the facility's true local calendar date (partition & join key). | `2026-10-23` |
+| `observation_time_utc` | `TIMESTAMP` | `NO` | `[Pipeline Derived]` | True UTC instant computed by subtracting `utc_offset_seconds` from `observation_local_time`: `(naive_dt - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=timezone.utc)`. | `2026-10-23 04:15:00.000 UTC` |
 | `temperature_2m_c` | `DOUBLE` | `NO` | `[API Response]` | Unnested from Open-Meteo `minutely_15.temperature_2m[k]` ($\text{^\circ C}$). | `26.5` |
 | `precipitation_mm` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `minutely_15.precipitation[k]` ($\text{mm}$). | `0.0` |
 | `wind_speed_10m_kmh` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `minutely_15.wind_speed_10m[k]` ($\text{km/h}$). | `19.8` |
-| `weather_code` | `INT` | `YES` | `[API Response]` | Unnested from Open-Meteo `minutely_15.weather_code[k]` (WMO 4677 code, including `97`). | `1` |
+| `weather_code` | `INT` | `NO` | `[API Response]` | Unnested from Open-Meteo `minutely_15.weather_code[k]` (WMO 4677 code, including `97`; non-null enforced by `DQ-DOM-001`). | `1` |
 | `weather_description` | `STRING` | `NO` | `[Pipeline Derived]` | Mapped from `weather_code` using `WMO_CODE_MAP`. | `"Mainly clear"` |
 | `row_value_hash` | `STRING` | `NO` | `[Pipeline Derived]` | SHA-256 hash of weather measurement columns (`temperature_2m_c`, `precipitation_mm`, `wind_speed_10m_kmh`, `weather_code`) used in `MERGE` guard to skip no-op updates. | `"7d865e959b2466918c9863afca942d0f..."` |
 | `source_ingestion_id` | `STRING` | `NO` | `[System Metadata]` | Foreign key to `bronze.weather_minutely_15.ingestion_id`. | `"m15-71e9204-882a-4c11-90ef-123456789abc"` |
 | `api_ingested_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | Propagated from `bronze.weather_minutely_15.ingested_at_utc`. | `2026-10-23 00:05:15.100 UTC` |
-| `updated_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | Current UTC timestamp set when inserted or updated by `MERGE INTO`. | `2026-10-23 00:05:17.500 UTC` |
+| `updated_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | UTC timestamp when inserted or updated by `MERGE INTO` (reflects last *value change* due to Guard 3; use `ops.pipeline_step_execution_log` or Gold `mart_updated_at_utc` for pipeline run freshness). | `2026-10-23 00:05:17.500 UTC` |
 
 ---
 
@@ -228,8 +228,8 @@ Every Silver fact table enforces three idempotency guards:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `location_id` | `STRING` | `NO` | `[Seed Config: locations.json]` | Propagated from `bronze.weather_hourly.location_id`. | `"AU-NSW-SYD-01"` |
 | `observation_local_time` | `STRING` | `NO` | `[API Response]` | Local ISO8601 timestamp string `hourly.time[k]` in the facility's local timezone. | `"2026-10-23T15:00"` |
-| `observation_local_date` | `DATE` | `NO` | `[Pipeline Derived]` | Derived as `to_date(observation_local_time, "yyyy-MM-dd'T'HH:mm")` — matches the local date grain of `silver.fact_weather_daily`. | `2026-10-23` |
-| `observation_time_utc` | `TIMESTAMP` | `NO` | `[Pipeline Derived]` | True UTC instant computed as `timestamp_seconds(unix_timestamp(observation_local_time, "yyyy-MM-dd'T'HH:mm") - utc_offset_seconds)`. | `2026-10-23 04:00:00.000 UTC` |
+| `observation_local_date` | `DATE` | `NO` | `[Pipeline Derived]` | Derived via `datetime.strptime(observation_local_time, "%Y-%m-%dT%H:%M").date()` — matches the local date grain of `silver.fact_weather_daily`. | `2026-10-23` |
+| `observation_time_utc` | `TIMESTAMP` | `NO` | `[Pipeline Derived]` | True UTC instant computed as `(naive_dt - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=timezone.utc)`. | `2026-10-23 04:00:00.000 UTC` |
 | `temperature_2m_c` | `DOUBLE` | `NO` | `[API Response]` | Unnested from Open-Meteo `hourly.temperature_2m[k]` ($\text{^\circ C}$). | `26.4` |
 | `apparent_temperature_c` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `hourly.apparent_temperature[k]` ($\text{^\circ C}$). | `27.8` |
 | `relative_humidity_pct` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `hourly.relative_humidity_2m[k]` ($\%$). | `62.0` |
@@ -238,12 +238,12 @@ Every Silver fact table enforces three idempotency guards:
 | `wind_speed_10m_kmh` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `hourly.wind_speed_10m[k]` ($\text{km/h}$). | `19.5` |
 | `surface_pressure_hpa` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `hourly.surface_pressure[k]` ($\text{hPa}$). | `1014.2` |
 | `uv_index` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `hourly.uv_index[k]`. | `7.2` |
-| `weather_code` | `INT` | `YES` | `[API Response]` | Unnested from Open-Meteo `hourly.weather_code[k]` (including `97`). | `1` |
+| `weather_code` | `INT` | `NO` | `[API Response]` | Unnested from Open-Meteo `hourly.weather_code[k]` (including `97`; non-null enforced by `DQ-DOM-001`). | `1` |
 | `weather_description` | `STRING` | `NO` | `[Pipeline Derived]` | Mapped from `weather_code` via `WMO_CODE_MAP`. | `"Mainly clear"` |
 | `row_value_hash` | `STRING` | `NO` | `[Pipeline Derived]` | SHA-256 hash of all hourly weather measurement columns used in the `MERGE` change-detection guard. | `"b5bb9d8014a0f9b1d61e21e796d78dcc..."` |
 | `source_ingestion_id` | `STRING` | `NO` | `[System Metadata]` | Foreign key to `bronze.weather_hourly.ingestion_id`. | `"hr-b71e9204-882a-4c11-90ef-123456789abc"` |
 | `api_ingested_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | Propagated from `bronze.weather_hourly.ingested_at_utc`. | `2026-10-23 00:05:15.250 UTC` |
-| `updated_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | Current UTC timestamp set when inserted or updated by `MERGE INTO`. | `2026-10-23 00:05:18.400 UTC` |
+| `updated_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | UTC timestamp when inserted or updated by `MERGE INTO` (reflects last *value change* due to Guard 3; use `ops.pipeline_step_execution_log` or Gold `mart_updated_at_utc` for pipeline run freshness). | `2026-10-23 00:05:18.400 UTC` |
 
 ---
 
@@ -256,32 +256,32 @@ Every Silver fact table enforces three idempotency guards:
 | Column Name | Data Type | Nullable | Origin / Source | Description & How Obtained / Created | Example Value |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `location_id` | `STRING` | `NO` | `[Seed Config: locations.json]` | Propagated from `bronze.weather_daily.location_id`. | `"AU-VIC-MEL-01"` |
-| `observation_local_date` | `DATE` | `NO` | `[API Response]` | Parsed via `to_date(daily.time[k], "yyyy-MM-dd")` from Open-Meteo's `daily.time` array (local calendar date at the facility). | `2026-10-23` |
+| `observation_local_date` | `DATE` | `NO` | `[API Response]` | Parsed via `datetime.strptime(daily.time[k], "%Y-%m-%d").date()` from Open-Meteo's `daily.time` array (local calendar date at the facility). | `2026-10-23` |
 | `temp_max_c` | `DOUBLE` | `NO` | `[API Response]` | Unnested from Open-Meteo `daily.temperature_2m_max[k]` ($\text{^\circ C}$). | `29.1` |
 | `temp_min_c` | `DOUBLE` | `NO` | `[API Response]` | Unnested from Open-Meteo `daily.temperature_2m_min[k]` ($\text{^\circ C}$). | `13.4` |
-| `diurnal_temp_range_c` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Calculated in PySpark as `round(temp_max_c - temp_min_c, 2)`. | `15.7` |
+| `diurnal_temp_range_c` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Calculated in Python as `round(float(temp_max_c) - float(temp_min_c), 2)`. | `15.7` |
 | `apparent_temp_max_c` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `daily.apparent_temperature_max[k]` ($\text{^\circ C}$). | `30.5` |
 | `apparent_temp_min_c` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `daily.apparent_temperature_min[k]` ($\text{^\circ C}$). | `11.8` |
 | `precipitation_sum_mm` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `daily.precipitation_sum[k]` ($\text{mm}$). | `2.4` |
 | `wind_speed_max_kmh` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `daily.wind_speed_10m_max[k]` ($\text{km/h}$). | `42.0` |
 | `uv_index_max` | `DOUBLE` | `YES` | `[API Response]` | Unnested from Open-Meteo `daily.uv_index_max[k]`. | `8.5` |
-| `weather_code` | `INT` | `YES` | `[API Response]` | Unnested from Open-Meteo `daily.weather_code[k]` (including `97`). | `61` |
+| `weather_code` | `INT` | `NO` | `[API Response]` | Unnested from Open-Meteo `daily.weather_code[k]` (including `97`; non-null enforced by `DQ-DOM-001`). | `61` |
 | `weather_description` | `STRING` | `NO` | `[Pipeline Derived]` | Mapped from `weather_code` via `WMO_CODE_MAP`. | `"Rain: Slight intensity"` |
 | `row_value_hash` | `STRING` | `NO` | `[Pipeline Derived]` | SHA-256 hash of daily weather measurement columns used in the `MERGE` change-detection guard. | `"c3ab8ff13720e8ad9047dd39466b3c89..."` |
 | `source_ingestion_id` | `STRING` | `NO` | `[System Metadata]` | Foreign key to `bronze.weather_daily.ingestion_id`. | `"dy-a12b34c5-882a-4c11-90ef-123456789abc"` |
 | `api_ingested_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | Propagated from `bronze.weather_daily.ingested_at_utc`. | `2026-10-23 00:05:15.400 UTC` |
-| `updated_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | Current UTC timestamp set when inserted or updated by `MERGE INTO`. | `2026-10-23 00:05:19.120 UTC` |
+| `updated_at_utc` | `TIMESTAMP` | `NO` | `[System Metadata]` | UTC timestamp when inserted or updated by `MERGE INTO` (reflects last *value change* due to Guard 3; use `ops.pipeline_step_execution_log` or Gold `mart_updated_at_utc` for pipeline run freshness). | `2026-10-23 00:05:19.120 UTC` |
 
 ---
 
 ### 3.5 Table: `silver.quarantine_weather_records`
 * **Objective:** Dead-letter / quarantine table populated by the Data Quality engine (`src/quality/validators.py`) whenever an incremental Bronze payload or unnested row violates any of the 13 DQ rules.
-* **Storage Format & Update Strategy:** Delta Lake (`APPEND` only).
+* **Storage Format & Update Strategy:** Delta Lake (`APPEND` with deterministic `quarantine_id` deduplication so checkpoint `repair` runs never create duplicate quarantine rows).
 * **Grain:** One row per quarantined record failure event.
 
 | Column Name | Data Type | Nullable | Origin / Source | Description & How Obtained / Created | Example Value |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `quarantine_id` | `STRING` | `NO` | `[System Metadata]` | UUID generated when the rejected record is written to quarantine. | `"q11a22b3-44c5-66d7-88e9-00f112233445"` |
+| `quarantine_id` | `STRING` | `NO` | `[Pipeline Derived]` | Deterministic SHA-256 hash of `pipeline_run_id || source_ingestion_id || raw_time_str || dq_rule_violated`. | `"q11a22b344c566d788e900f112233445..."` |
 | `pipeline_run_id` | `STRING` | `NO` | `[System Metadata]` | Active pipeline execution run ID. | `"run-20261023-070512-8f3a"` |
 | `source_bronze_table` | `STRING` | `NO` | `[Pipeline Derived]` | Originating Bronze table (`bronze.weather_minutely_15`, `bronze.weather_hourly`, or `bronze.weather_daily`). | `"bronze.weather_hourly"` |
 | `source_ingestion_id` | `STRING` | `NO` | `[System Metadata]` | Foreign key to the originating Bronze table's `ingestion_id`. | `"hr-b71e9204-882a-4c11-90ef-123456789abc"` |
@@ -310,16 +310,16 @@ Every Silver fact table enforces three idempotency guards:
 | `state_code` | `STRING` | `NO` | `[Seed Config: locations.json]` | Joined from `silver.dim_location_scd2.state_code`. | `"NSW"` |
 | `timezone_name` | `STRING` | `NO` | `[Seed Config: locations.json]` | Joined from `silver.dim_location_scd2.timezone_name`. | `"Australia/Sydney"` |
 | `observation_local_date` | `DATE` | `NO` | `[API Response]` | Facility local calendar date from `silver.fact_weather_daily.observation_local_date`. | `2026-10-23` |
-| `is_forecast` | `BOOLEAN` | `NO` | `[Pipeline Derived]` | Computed dynamically at Gold build time against the facility's local current date (`facility_local_today = to_date(from_utc_timestamp(current_timestamp(), timezone_name))`): `true` if `observation_local_date >= facility_local_today`, else `false`. | `true` |
+| `is_forecast` | `BOOLEAN` | `NO` | `[Pipeline Derived]` | Computed dynamically at Gold build time against the facility's local current date (`facility_local_today = now_utc.astimezone(ZoneInfo(timezone_name)).date()`): `true` if `observation_local_date >= facility_local_today`, else `false`. | `true` |
 | `data_horizon_type` | `STRING` | `NO` | `[Pipeline Derived]` | Three-state temporal classification relative to `facility_local_today`: `"PAST_MODELLED"` if `observation_local_date < facility_local_today`, `"TODAY_MIXED"` if `observation_local_date == facility_local_today`, and `"FORWARD_FORECAST"` if `observation_local_date > facility_local_today`. | `"TODAY_MIXED"` |
 | `temp_max_c` | `DOUBLE` | `NO` | `[API Response]` | From `silver.fact_weather_daily.temp_max_c`. | `28.5` |
 | `temp_min_c` | `DOUBLE` | `NO` | `[API Response]` | From `silver.fact_weather_daily.temp_min_c`. | `16.2` |
 | `diurnal_temp_range_c` | `DOUBLE` | `NO` | `[Pipeline Derived]` | From `silver.fact_weather_daily.diurnal_temp_range_c`. | `12.3` |
 | `hourly_avg_temp_c` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Computed via `ROUND(AVG(temperature_2m_c), 2)` grouped by `(location_id, observation_local_date)` from `silver.fact_weather_hourly`. | `21.8` |
 | `hourly_avg_humidity_pct` | `DOUBLE` | `YES` | `[Pipeline Derived]` | Computed via `ROUND(AVG(relative_humidity_pct), 2)` grouped by `(location_id, observation_local_date)` from `silver.fact_weather_hourly`. | `64.5` |
-| `rolling_7d_avg_temp_c` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Computed via PySpark Window function: `ROUND(AVG(hourly_avg_temp_c) OVER (PARTITION BY location_id ORDER BY observation_local_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 2)`. | `19.4` |
+| `rolling_7d_avg_temp_c` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Computed via DuckDB SQL Window function: `ROUND(AVG(hourly_avg_temp_c) OVER (PARTITION BY location_id ORDER BY observation_local_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 2)`. | `19.4` |
 | `temp_anomaly_vs_7d_c` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Computed as `ROUND(hourly_avg_temp_c - rolling_7d_avg_temp_c, 2)`. | `+2.4` |
-| `rolling_7d_precip_mm` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Computed via PySpark Window function: `ROUND(SUM(precipitation_sum_mm) OVER (PARTITION BY location_id ORDER BY observation_local_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 2)`. | `18.6` |
+| `rolling_7d_precip_mm` | `DOUBLE` | `NO` | `[Pipeline Derived]` | Computed via DuckDB SQL Window function: `ROUND(SUM(precip_mm) OVER (PARTITION BY location_id ORDER BY observation_local_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 2)`. | `18.6` |
 | `extreme_heat_hours_count` | `INT` | `NO` | `[Pipeline Derived]` | Count of hours in `silver.fact_weather_hourly` on `observation_local_date` where `temperature_2m_c >= ALERT_HEATWAVE_TEMP_C`. | `0` |
 | `extreme_cold_hours_count` | `INT` | `NO` | `[Pipeline Derived]` | Count of hours in `silver.fact_weather_hourly` on `observation_local_date` where `temperature_2m_c <= ALERT_COLD_SNAP_TEMP_C`. | `0` |
 | `dominant_weather_condition` | `STRING` | `NO` | `[Pipeline Derived]` | Propagated from `silver.fact_weather_daily.weather_description`. | `"Partly cloudy"` |
@@ -334,7 +334,7 @@ Every Silver fact table enforces three idempotency guards:
 
 | Column Name | Data Type | Nullable | Origin / Source | Description & How Obtained / Created | Example Value |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `alert_id` | `STRING` | `NO` | `[Pipeline Derived]` | Deterministic primary key computed as `sha2(concat_ws('||', location_id, cast(observation_local_date as string)), 256)`. | `"3c9b1e2f8a7d6c5b4a3f2e1d0c9b8a7f..."` |
+| `alert_id` | `STRING` | `NO` | `[Pipeline Derived]` | Deterministic primary key computed via Python `hashlib.sha256(f"{location_id}||{observation_local_date}".encode()).hexdigest()`. | `"3c9b1e2f8a7d6c5b4a3f2e1d0c9b8a7f..."` |
 | `location_id` | `STRING` | `NO` | `[Seed Config: locations.json]` | Facility hub identifier from `silver.dim_location_scd2`. | `"AU-NT-DRW-01"` |
 | `location_name` | `STRING` | `NO` | `[Seed Config: locations.json]` | Facility hub name from `silver.dim_location_scd2`. | `"Darwin Top End Care Hub"` |
 | `state_code` | `STRING` | `NO` | `[Seed Config: locations.json]` | Australian state/territory code from `silver.dim_location_scd2`. | `"NT"` |
@@ -342,7 +342,7 @@ Every Silver fact table enforces three idempotency guards:
 | `observation_local_date` | `DATE` | `NO` | `[API Response]` | Local calendar date at the facility from `silver.fact_weather_daily.observation_local_date`. | `2026-10-25` |
 | `is_forecast` | `BOOLEAN` | `NO` | `[Pipeline Derived]` | Dynamically evaluated at Gold build time against the facility's local date (`observation_local_date >= facility_local_today`). | `true` |
 | `data_horizon_type` | `STRING` | `NO` | `[Pipeline Derived]` | `"PAST_MODELLED"`, `"TODAY_MIXED"`, or `"FORWARD_FORECAST"` relative to `facility_local_today`. | `"FORWARD_FORECAST"` |
-| `overall_risk_severity` | `STRING` | `NO` | `[Pipeline Derived]` | Rule-based classification: `"CRITICAL"` if $\ge 2$ hazard flags are `true` or `temp_max_c >= ALERT_HEATWAVE_TEMP_C + 5`; `"WARNING"` if $1$ major hazard flag is `true`; `"WATCH"` if within $2^\circ\text{C}$ of threshold; else `"NORMAL"`. | `"WARNING"` |
+| `overall_risk_severity` | `STRING` | `NO` | `[Pipeline Derived]` | Rule-based classification: `"CRITICAL"` if $\ge 2$ hazard flags are `true`, `temp_max_c >= ALERT_HEATWAVE_TEMP_C + 5`, or `weather_code IN (95, 96, 97, 99)`; `"WARNING"` if $1$ major hazard flag is `true`; `"WATCH"` if within $3^\circ\text{C}$ of heatwave (`>= 32.0`), within $2^\circ\text{C}$ of cold snap (`<= 7.0`), or within $15\text{ km/h}$ of high wind (`>= 45.0`); else `"NORMAL"`. | `"WARNING"` |
 | `is_heatwave_risk` | `BOOLEAN` | `NO` | `[Pipeline Derived]` | `temp_max_c >= .env.ALERT_HEATWAVE_TEMP_C` ($35^\circ\text{C}$) OR `apparent_temp_max_c >= 37.0`. | `true` |
 | `is_cold_snap_risk` | `BOOLEAN` | `NO` | `[Pipeline Derived]` | `temp_min_c <= .env.ALERT_COLD_SNAP_TEMP_C` ($5^\circ\text{C}$). | `false` |
 | `is_severe_storm_risk` | `BOOLEAN` | `NO` | `[Pipeline Derived]` | `wind_speed_max_kmh >= .env.ALERT_HIGH_WIND_KMH` ($60\text{ km/h}$) OR `precipitation_sum_mm >= 25.0` OR `weather_code IN (95, 96, 97, 99)`. | `false` |

@@ -90,3 +90,49 @@ def test_stage1_and_stage2_dq_rules_and_wmo_97_pass(
     wmo97_rows = hr_df[hr_df["weather_code"] == 97]
     assert len(wmo97_rows) == 1
     assert wmo97_rows.iloc[0]["weather_description"] == "Thunderstorm: Heavy without hail"
+
+    # Verify idempotent quarantine append on repair/replay of the exact same pipeline_run_id:
+    initial_q_count = len(q_df)
+    res_hr_replay = st.transform_fact_hourly(pipeline_run_id="run-dq-01")
+    assert res_hr_replay["rows_quarantined"] == 0
+    q_df_after_replay = DeltaTable(
+        str(isolated_settings.silver_path / "quarantine_weather_records")
+    ).to_pandas()
+    assert len(q_df_after_replay) == initial_q_count
+
+
+def test_missing_utc_offset_triggers_dq_struct_003(
+    spark, isolated_settings: PipelineSettings, sample_open_meteo_batch_payload
+) -> None:
+    """Verify Fix #13: Missing utc_offset_seconds in API payload is stored as NULL in Bronze
+    (not silently defaulted to 0) and caught by Stage-1 rule DQ-STRUCT-003.
+    """
+    payloads = json.loads(json.dumps(sample_open_meteo_batch_payload))
+    del payloads[0]["utc_offset_seconds"]
+
+    landing_file = isolated_settings.landing_raw_json_dir / "batch_missing_offset.json"
+    envelope = {
+        "call_id": "call-dq-offset",
+        "pipeline_run_id": "run-dq-offset",
+        "ingested_at_utc": datetime.now(timezone.utc).isoformat(),
+        "ingestion_date": "2026-10-23",
+        "endpoint_url": isolated_settings.open_meteo_base_url,
+        "locations_metadata": [loc.model_dump() for loc in isolated_settings.load_locations()],
+        "payloads": payloads,
+    }
+    landing_file.write_text(json.dumps(envelope), encoding="utf-8")
+
+    bw = BronzeWriter(spark, isolated_settings)
+    bw.write_hourly(landing_file, pipeline_run_id="run-dq-offset")
+
+    st = SilverTransformer(spark, isolated_settings)
+    res_hr = st.transform_fact_hourly(pipeline_run_id="run-dq-offset")
+    assert res_hr["rows_quarantined"] == 1
+    assert res_hr["rows_processed"] == 3  # Darwin's 3 valid rows still processed
+
+    q_df = DeltaTable(
+        str(isolated_settings.silver_path / "quarantine_weather_records")
+    ).to_pandas()
+    offset_Violation = q_df[q_df["pipeline_run_id"] == "run-dq-offset"]
+    assert len(offset_Violation) == 1
+    assert "DQ-STRUCT-003" in offset_Violation.iloc[0]["dq_rule_violated"]
