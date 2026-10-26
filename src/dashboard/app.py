@@ -268,15 +268,15 @@ def main() -> None:
             "2. Daily Weather Summary vs 7-Day Rolling Baseline (Gold)": (
                 "SELECT location_id, location_name, observation_local_date, data_horizon_type,\n"
                 "       temp_min_c, temp_max_c, hourly_avg_temp_c, rolling_7d_avg_temp_c,\n"
-                "       ROUND(hourly_avg_temp_c - rolling_7d_avg_temp_c, 2) AS temp_anomaly_c,\n"
-                "       dominant_weather_description\n"
+                "       temp_anomaly_vs_7d_c, dominant_weather_condition\n"
                 "FROM gold.mart_daily_weather_summary\n"
                 "ORDER BY location_id, observation_local_date;"
             ),
             "3. Monitored Care Hubs SCD Type 2 Dimension (Silver)": (
                 "SELECT location_sk, location_id, location_name, state_code, timezone_name,\n"
-                "       climate_risk_tier, requested_lat, requested_lon, snapped_grid_lat, snapped_grid_lon,\n"
-                "       grid_snap_distance_km, effective_from_utc, effective_to_utc, is_current\n"
+                "       climate_risk_tier, requested_latitude, requested_longitude,\n"
+                "       model_grid_latitude, model_grid_longitude, grid_snap_distance_km,\n"
+                "       effective_from_utc, effective_to_utc, is_current\n"
                 "FROM silver.dim_location_scd2\n"
                 "ORDER BY location_id;"
             ),
@@ -285,7 +285,7 @@ def main() -> None:
                 "       h.observation_local_date,\n"
                 "       MAX(h.temperature_2m_c) AS max_hourly_temp_c,\n"
                 "       MAX(h.apparent_temperature_c) AS max_feels_like_c,\n"
-                "       MAX(h.wind_gusts_10m_kmh) AS max_gust_kmh\n"
+                "       MAX(h.wind_speed_10m_kmh) AS max_wind_kmh\n"
                 "FROM silver.fact_weather_hourly h\n"
                 "JOIN silver.dim_location_scd2 d\n"
                 "  ON h.location_id = d.location_id AND d.is_current = TRUE\n"
@@ -302,7 +302,8 @@ def main() -> None:
             ),
             "6. Pipeline Step Execution & Repair Audit Log (Ops)": (
                 "SELECT pipeline_run_id, step_sequence_order, step_name, step_status,\n"
-                "       rows_processed, rows_quarantined, execution_duration_sec, logged_at_utc\n"
+                "       rows_processed, rows_quarantined, duration_seconds,\n"
+                "       error_type, error_message, logged_at_utc\n"
                 "FROM ops.pipeline_step_execution_log\n"
                 "ORDER BY logged_at_utc DESC, step_sequence_order;"
             ),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import uuid
 from pathlib import Path
@@ -16,6 +17,8 @@ from src.config.settings import PipelineSettings, get_settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_SUPPORTS_ENGINE_ARG = "engine" in inspect.signature(write_deltalake).parameters
 
 
 class BronzeWriter:
@@ -77,12 +80,20 @@ class BronzeWriter:
                     "utc_offset_seconds": (
                         int(api_obj["utc_offset_seconds"])
                         if api_obj.get("utc_offset_seconds") is not None
-                        else 0
+                        else None
                     ),
                     "requested_latitude": float(loc_meta["latitude"]),
                     "requested_longitude": float(loc_meta["longitude"]),
-                    "model_grid_latitude": float(api_obj.get("latitude", 0.0)),
-                    "model_grid_longitude": float(api_obj.get("longitude", 0.0)),
+                    "model_grid_latitude": (
+                        float(api_obj["latitude"])
+                        if api_obj.get("latitude") is not None
+                        else None
+                    ),
+                    "model_grid_longitude": (
+                        float(api_obj["longitude"])
+                        if api_obj.get("longitude") is not None
+                        else None
+                    ),
                     "elevation_m": (
                         float(api_obj["elevation"])
                         if api_obj.get("elevation") is not None
@@ -114,11 +125,11 @@ class BronzeWriter:
                 pa.field("state_code", pa.string(), nullable=False),
                 pa.field("climate_risk_tier", pa.string(), nullable=False),
                 pa.field("timezone_name", pa.string(), nullable=False),
-                pa.field("utc_offset_seconds", pa.int32(), nullable=False),
+                pa.field("utc_offset_seconds", pa.int32(), nullable=True),
                 pa.field("requested_latitude", pa.float64(), nullable=False),
                 pa.field("requested_longitude", pa.float64(), nullable=False),
-                pa.field("model_grid_latitude", pa.float64(), nullable=False),
-                pa.field("model_grid_longitude", pa.float64(), nullable=False),
+                pa.field("model_grid_latitude", pa.float64(), nullable=True),
+                pa.field("model_grid_longitude", pa.float64(), nullable=True),
                 pa.field("elevation_m", pa.float64(), nullable=True),
                 pa.field(f"{grain_key}_units_json", pa.string(), nullable=False),
                 pa.field(f"{grain_key}_payload_json", pa.string(), nullable=False),
@@ -130,6 +141,7 @@ class BronzeWriter:
         )
 
         df = pd.DataFrame(rows)
+        df["utc_offset_seconds"] = df["utc_offset_seconds"].astype("Int32")
         df["ingested_at_utc"] = pd.to_datetime(df["ingested_at_utc"], utc=True)
         df["ingestion_date"] = pd.to_datetime(df["ingestion_date"]).dt.date
 
@@ -145,7 +157,8 @@ class BronzeWriter:
         }
         if (target_path / "_delta_log").exists():
             write_kwargs["schema_mode"] = "merge"
-            write_kwargs["engine"] = "rust"
+            if _SUPPORTS_ENGINE_ARG:
+                write_kwargs["engine"] = "rust"
 
         write_deltalake(**write_kwargs)
         logger.info("Appended %d rows to bronze.%s at %s", len(rows), table_folder, target_path)

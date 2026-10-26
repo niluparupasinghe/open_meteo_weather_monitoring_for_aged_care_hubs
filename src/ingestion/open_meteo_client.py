@@ -45,6 +45,7 @@ class OpenMeteoClient:
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=frozenset(["GET"]),
             respect_retry_after_header=True,
+            raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         sess.mount("https://", adapter)

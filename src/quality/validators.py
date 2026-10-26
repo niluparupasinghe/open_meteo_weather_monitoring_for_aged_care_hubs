@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
-import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import pyarrow as pa
-from deltalake import write_deltalake
+from deltalake import DeltaTable, write_deltalake
 
 from src.config.settings import PipelineSettings, get_settings
 from src.utils.logger import get_logger
 from src.utils.wmo_codes import VALID_WMO_CODES
 
 logger = get_logger(__name__)
+
+_SUPPORTS_ENGINE_ARG = "engine" in inspect.signature(write_deltalake).parameters
 
 QUARANTINE_ARROW_SCHEMA = pa.schema(
     [
@@ -44,12 +47,52 @@ class DataQualityValidator:
         self.settings = settings or get_settings()
         self.quarantine_path = self.settings.silver_path / "quarantine_weather_records"
 
+    @staticmethod
+    def _build_quarantine_id(
+        pipeline_run_id: str,
+        source_ingestion_id: str,
+        raw_time_str: Optional[str],
+        rules: List[str],
+    ) -> str:
+        """Compute deterministic SHA-256 quarantine_id so checkpoint repair runs are idempotent."""
+        raw_key = (
+            f"{pipeline_run_id}||{source_ingestion_id}||"
+            f"{raw_time_str if raw_time_str is not None else 'STAGE1'}||{','.join(rules)}"
+        )
+        return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
     def append_to_quarantine(self, quarantine_rows: List[Dict[str, Any]]) -> int:
-        """Append formatted failure records to silver.quarantine_weather_records Delta table."""
+        """Append formatted failure records to silver.quarantine_weather_records Delta table (idempotently)."""
         if not quarantine_rows:
             return 0
 
-        df = pd.DataFrame(quarantine_rows)
+        # Deduplicate within the incoming batch by deterministic quarantine_id
+        deduped_by_id: Dict[str, Dict[str, Any]] = {}
+        for row in quarantine_rows:
+            deduped_by_id[str(row["quarantine_id"])] = row
+
+        has_existing_table = (self.quarantine_path / "_delta_log").exists()
+        if has_existing_table:
+            existing_ids = set(
+                DeltaTable(str(self.quarantine_path))
+                .to_pyarrow_table(columns=["quarantine_id"])
+                .column("quarantine_id")
+                .to_pylist()
+            )
+            new_rows = [
+                row for qid, row in deduped_by_id.items() if qid not in existing_ids
+            ]
+        else:
+            new_rows = list(deduped_by_id.values())
+
+        if not new_rows:
+            logger.info(
+                "All %d quarantined record(s) already present in silver.quarantine_weather_records; skipping duplicate append",
+                len(quarantine_rows),
+            )
+            return 0
+
+        df = pd.DataFrame(new_rows)
         df["quarantined_at_utc"] = pd.to_datetime(df["quarantined_at_utc"], utc=True)
 
         self.quarantine_path.mkdir(parents=True, exist_ok=True)
@@ -60,16 +103,17 @@ class DataQualityValidator:
             "data": table,
             "mode": "append",
         }
-        if (self.quarantine_path / "_delta_log").exists():
+        if has_existing_table:
             write_kwargs["schema_mode"] = "merge"
-            write_kwargs["engine"] = "rust"
+            if _SUPPORTS_ENGINE_ARG:
+                write_kwargs["engine"] = "rust"
 
         write_deltalake(**write_kwargs)
         logger.warning(
             "Routed %d failed record(s) to silver.quarantine_weather_records",
-            len(quarantine_rows),
+            len(new_rows),
         )
-        return len(quarantine_rows)
+        return len(new_rows)
 
     def validate_stage1_structural_row(
         self,
@@ -110,10 +154,13 @@ class DataQualityValidator:
         offset = bronze_row.get("utc_offset_seconds")
         coords_ok = (
             lat is not None
+            and not pd.isna(lat)
             and -90.0 <= float(lat) <= 90.0
             and lon is not None
+            and not pd.isna(lon)
             and -180.0 <= float(lon) <= 180.0
             and offset is not None
+            and not pd.isna(offset)
             and -43200 <= int(offset) <= 50400
         )
         if not coords_ok:
@@ -123,11 +170,13 @@ class DataQualityValidator:
         if not rules:
             return None
 
+        run_id_str = str(bronze_row["pipeline_run_id"])
+        ing_id_str = str(bronze_row["ingestion_id"])
         return {
-            "quarantine_id": str(uuid.uuid4()),
-            "pipeline_run_id": str(bronze_row["pipeline_run_id"]),
+            "quarantine_id": self._build_quarantine_id(run_id_str, ing_id_str, None, rules),
+            "pipeline_run_id": run_id_str,
             "source_bronze_table": source_bronze_table,
-            "source_ingestion_id": str(bronze_row["ingestion_id"]),
+            "source_ingestion_id": ing_id_str,
             "target_silver_table": target_silver_table,
             "location_id": str(bronze_row.get("location_id", "")),
             "observation_timestamp_raw": None,
@@ -264,11 +313,15 @@ class DataQualityValidator:
         serializable_row = {
             k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()
         }
+        run_id_str = str(pipeline_run_id)
+        ing_id_str = str(row.get("source_ingestion_id", ""))
         return {
-            "quarantine_id": str(uuid.uuid4()),
-            "pipeline_run_id": str(pipeline_run_id),
+            "quarantine_id": self._build_quarantine_id(
+                run_id_str, ing_id_str, raw_time_str, rules
+            ),
+            "pipeline_run_id": run_id_str,
             "source_bronze_table": source_bronze_table,
-            "source_ingestion_id": str(row.get("source_ingestion_id", "")),
+            "source_ingestion_id": ing_id_str,
             "target_silver_table": target_silver_table,
             "location_id": str(row.get("location_id", "")),
             "observation_timestamp_raw": str(raw_time_str) if raw_time_str is not None else None,

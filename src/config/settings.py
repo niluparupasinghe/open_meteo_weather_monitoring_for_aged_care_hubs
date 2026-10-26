@@ -97,7 +97,7 @@ class PipelineSettings(BaseSettings):
         default=Path("config/locations.json"), alias="LOCATIONS_CONFIG_PATH"
     )
 
-    # 4. Landing Zone, Lakehouse Storage & Spark / Delta Configuration
+    # 4. Landing Zone, Lakehouse Storage & Delta Configuration
     data_root_dir: Path = Field(default=Path("./data"), alias="DATA_ROOT_DIR")
     landing_raw_json_dir: Path = Field(
         default=Path("./data/landing/raw_json"), alias="LANDING_RAW_JSON_DIR"
@@ -106,8 +106,6 @@ class PipelineSettings(BaseSettings):
     bronze_path: Path = Field(default=Path("./data/lakehouse/bronze"), alias="BRONZE_PATH")
     silver_path: Path = Field(default=Path("./data/lakehouse/silver"), alias="SILVER_PATH")
     gold_path: Path = Field(default=Path("./data/lakehouse/gold"), alias="GOLD_PATH")
-    spark_master: str = Field(default="local[*]", alias="SPARK_MASTER")
-    spark_driver_memory: str = Field(default="2g", alias="SPARK_DRIVER_MEMORY")
     delta_enable_cdf: bool = Field(default=True, alias="DELTA_ENABLE_CDF")
 
     # 5. Data Quality, Archiving & Gold Alerting Thresholds
@@ -127,6 +125,16 @@ class PipelineSettings(BaseSettings):
     archive_hot_retention_days: int = Field(default=30, alias="ARCHIVE_HOT_RETENTION_DAYS")
     archive_warm_retention_days: int = Field(default=90, alias="ARCHIVE_WARM_RETENTION_DAYS")
     archive_cold_expiration_days: int = Field(default=2555, alias="ARCHIVE_COLD_EXPIRATION_DAYS")
+
+    # 6. Pipeline Run Email Notification Configuration
+    alert_email_enabled: bool = Field(default=False, alias="ALERT_EMAIL_ENABLED")
+    smtp_host: str = Field(default="smtp.gmail.com", alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_use_tls: bool = Field(default=True, alias="SMTP_USE_TLS")
+    smtp_username: Optional[str] = Field(default=None, alias="SMTP_USERNAME")
+    smtp_password: Optional[str] = Field(default=None, alias="SMTP_PASSWORD")
+    alert_email_from: Optional[str] = Field(default=None, alias="ALERT_EMAIL_FROM")
+    alert_email_to: Optional[str] = Field(default=None, alias="ALERT_EMAIL_TO")
 
     @field_validator("weather_cell_selection")
     @classmethod
